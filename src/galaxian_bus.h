@@ -55,13 +55,14 @@ struct HardwareRegs {
     bool irq_enabled       = false; // bit 0 de 0x7001 — enable IRQ VBLANK maskable
     bool first_irq_triggered = false; // true après la première IRQ (boot terminé)
     bool coin_lock         = false; // 0x6002 bit0
-    bool flip_screen       = false; // 0x6003 bit0
+    bool flip_screen_x     = false; // 0x7006 — Flip screen X (mirror 0x07f8)
+    bool flip_screen_y     = false; // 0x7007 — Flip screen Y (mirror 0x07f8)
     bool star_enable       = false; // 0x7004 bit0
     uint8_t sound_ctrl     = 0;     // 0x6004/0x6005 (ports son)
     
-    // Watchdog — compteur de cycles depuis le dernier reset
-    // Le Z80 lit 0x7800 pour réarmer le watchdog. Si non réarmé, reset du CPU.
-    uint32_t watchdog_counter = 0;
+    // Watchdog — MAME : set_vblank_count("screen", 8) → reset si pas de lecture 0x7800 pendant 8 VBLANK (~132ms)
+    int     watchdog_vblanks   = 0; // compteur de VBLANK depuis dernier réarmement
+    static constexpr int WATCHDOG_MAX_VBLANKS = 8;
 };
 
 // ============================================================================
@@ -93,7 +94,8 @@ public:
     // RAM 1KB avec mirror 0x0400 (MAME galaxian.cpp)
     uint8_t ram  [0x0400] = {};
     uint8_t vram [0x0400] = {};
-    uint8_t cram [0x0400] = {}; // ✅ Color RAM (1KB, 0x5400-0x57FF)
+    // ⚠️ Pas de CRAM sur Galaxian : 0x5400-0x57FF est un mirror physique de VRAM (0x5000-0x53FF)
+    // La couleur des tuiles de fond vient de spram[col*2+1] & 0x07 (attribut de colonne dans l'OBJRAM)
     // 0x5800-0x5FFF → miroir OBJRAM/SPRAM (256 octets)
     // OBJRAM 512 octets : 0x5800-0x583F = attributs/scroll, 0x5840+ = sprites
     uint8_t spram[0x0200] = {};
@@ -110,10 +112,10 @@ public:
         // RAM 1KB avec mirror 0x0400
         if (addr < 0x5000) return ram[(addr - 0x4000) & 0x03FF];
         if (addr < 0x5400) return vram[addr & 0x03FF];       // VRAM (1KB, 0x5000-0x53FF)
-        if (addr < 0x5800) return cram[addr & 0x03FF];       // ✅ CRAM (1KB, 0x5400-0x57FF)
-        if (addr < 0x6000) return spram[addr & 0x00FF];      // OBJRAM/SPRAM (256B, 0x5800-0x58FF)
-
-        // Ports d'entrée mappés en mémoire — plages complètes
+        if (addr < 0x5800) return vram[addr & 0x03FF];       // Mirror physique de VRAM (0x5400-0x57FF) — MAME galaxian.cpp
+        // 0x5800-0x5FFF : zone non mappée sur Galaxian de base → bus flottant (0xFF)
+        // MAME galaxian_map_base() : pas de map pour cette plage, unmap_value_high() = 0xFF
+        if (addr < 0x6000) return 0xFF;                      // Bus flottant — non mappé sur hardware
         if (addr < 0x6800) return build_in0();       // 0x6000-0x67FF
         if (addr < 0x7000) return build_in1();       // 0x6800-0x6FFF
         if (addr < 0x7800) return build_in2();       // 0x7000-0x77FF
@@ -135,8 +137,11 @@ public:
             return;
         }
         if (addr < 0x5400) { vram[addr & 0x03FF] = val; return; }   // VRAM (0x5000-0x53FF)
-        if (addr < 0x5800) { cram[addr & 0x03FF] = val; return; }   // ✅ CRAM (0x5400-0x57FF)
-        if (addr < 0x6000) { spram[addr & 0x00FF] = val; return; }  // AttributesRAM (0x5800-0x58FF)
+        if (addr < 0x5800) { vram[addr & 0x03FF] = val; return; }   // Mirror physique de VRAM (0x5400-0x57FF) — MAME galaxian.cpp
+        // 0x5800-0x5FFF : zone non mappée sur Galaxian de base → écriture ignorée
+        // MAME galaxian_map_base() : pas de map pour cette plage
+        if (addr < 0x6000) return;                                    // Non mappé — ignore write
+        if (addr < 0x6800) { spram[addr & 0x00FF] = val; return; }   // OBJRAM/SPRAM (0x6000-0x67FF, mirror 0x01FF sur 0x5800)
 
         write_hw_reg(addr, val);
     }
@@ -165,65 +170,58 @@ public:
 public:
     // ------------------------------------------------------------------------
     // build_in0 — Port IN0 (0x6000) : Coin1, Coin2, Joystick P1, DIP cabinet, TEST, SERVICE
-    // Bits actifs bas : 0 = pressé/actif, 1 = relâché/inactif
+    // MAME galaxian.cpp : tous les bits sont IP_ACTIVE_HIGH → base 0x00, on positionne le bit quand actif.
     // ========================================================================
     uint8_t build_in0() const {
-        uint8_t v = 0xFF;
-        // Bit 0 = Coin 1 (HIGH = non inséré, LOW = pièce insérée)
-        if (input.coin1)   v &= ~(1 << 0); else v |=  (1 << 0);
-        // Bit 1 = Coin 2 (HIGH = non inséré, LOW = pièce insérée)
-        if (input.coin2)   v &= ~(1 << 1); else v |=  (1 << 1);
-        // Bit 2-3 = Joystick P1 (HIGH = relâché)
-        if (input.left)    v &= ~(1 << 2); else v |=  (1 << 2);
-        if (input.right)   v &= ~(1 << 3); else v |=  (1 << 3);
-        // Bit 4 = Bouton tir P1 (HIGH = relâché)
-        if (input.fire)    v &= ~(1 << 4); else v |=  (1 << 4);
-        // Bit 5 = DIP Cabinet (0 = Upright, 1 = Cocktail)
-        if (input.dipsw_cabinet) v |= (1 << 5); else v &= ~(1 << 5);
-
-        // BUG P0 #2 CORRIGÉ : TEST et SERVICE sont actifs LOW sur le hardware Galaxian.
-        // test_switch=false (défaut) → bit=1 (HIGH = OFF) — pas ON comme avant.
-        // service=false (défaut) → bit=1 (HIGH = relâché) — pas pressé comme avant.
-        if (input.test_switch)   v &= ~(1 << 6); else v |=  (1 << 6);
-        if (input.service)       v &= ~(1 << 7); else v |=  (1 << 7);
+        uint8_t v = 0x00;
+        // Bit 0 = Coin1 (IP_ACTIVE_HIGH)
+        if (input.coin1)   v |= (1 << 0);
+        // Bit 1 = Coin2 (IP_ACTIVE_HIGH)
+        if (input.coin2)   v |= (1 << 1);
+        // Bit 2 = Joystick Left P1 (IP_ACTIVE_HIGH)
+        if (input.left)    v |= (1 << 2);
+        // Bit 3 = Joystick Right P1 (IP_ACTIVE_HIGH)
+        if (input.right)   v |= (1 << 3);
+        // Bit 4 = Bouton tir P1 (IP_ACTIVE_HIGH)
+        if (input.fire)    v |= (1 << 4);
+        // Bit 5 = DIP Cabinet (0=Upright, 1=Cocktail) — valeur brute du switch
+        if (input.dipsw_cabinet) v |= (1 << 5);
+        // Bit 6 = TEST (IP_ACTIVE_HIGH)
+        if (input.test_switch)   v |= (1 << 6);
+        // Bit 7 = SERVICE (IP_ACTIVE_HIGH)
+        if (input.service)       v |= (1 << 7);
         return v;
     }
 
     // ------------------------------------------------------------------------
     // build_in1 — Port IN1 (0x6800) : Start P1/P2, DIP coinage
+    // MAME galaxian.cpp : bits Start IP_ACTIVE_HIGH, DIP coinage = valeurs brutes.
     // ========================================================================
     uint8_t build_in1() const {
-        uint8_t v = 0xFF;
-        // Bit 0 = Start Player 1 (HIGH = non pressé)
-        if (input.start1) v &= ~0x01;
-        // Bit 1 = Start Player 2 (HIGH = non pressé)
-        if (input.start2) v &= ~0x02;
-        // Bits 6-7 = DIP Coinage
-        // 00 = 1C/1C (défaut), 01 = 2C/1C, 10 = 1C/2C, 11 = Free Play
+        uint8_t v = 0x00;
+        // Bit 0 = Start Player 1 (IP_ACTIVE_HIGH)
+        if (input.start1) v |= 0x01;
+        // Bit 1 = Start Player 2 (IP_ACTIVE_HIGH)
+        if (input.start2) v |= 0x02;
+        // Bits 6-7 = DIP Coinage — valeurs brutes MAME :
+        // 00=1C/1C(défaut), 01=2C/1C, 10=1C/2C, 11=Free Play
         uint8_t coinage = input.dipsw_coinage & 0x03;
-        switch (coinage) {
-            case 0: break;                              // 1C/1C — tous bits HIGH
-            case 1: v &= ~(1 << 6); break;              // 2C/1C — bit 6 LOW
-            case 2: v &= ~(1 << 7); break;              // 1C/2C — bit 7 LOW
-            case 3: v &= ~0xC0; break;                 // Free Play : bits 6-7 LOW
-            default: break;
-        }
+        v |= (coinage << 6);
         return v;
     }
 
     // ------------------------------------------------------------------------
     // build_in2 — Port IN2 (0x7000) : DIP bonus life, lives
+    // MAME galaxian.cpp : bits bonus/lives = valeurs brutes.
     // ========================================================================
     uint8_t build_in2() const {
-        uint8_t v = 0xFF;
-        // Bits 0-1 = DIP Bonus Life Score
-        // 00 = 7000, 01 = 10000 (défaut), 10 = 12000, 11 = 20000
+        uint8_t v = 0x00;
+        // Bits 0-1 = DIP Bonus Life Score — valeurs brutes MAME :
+        // 00=7000, 01=10000(défaut), 10=12000, 11=20000
         uint8_t bonus = input.dipsw_bonus & 0x03;
-        if (bonus == 1) v &= ~0x01;
-        else if (bonus == 2) v &= ~0x02;
-        // Bit 2 = DIP Lives (défaut hardware = 3 vies → bit=1)
-        if (!input.dipsw_lives) v &= ~0x04;
-        else                     v |=  0x04;
+        v |= bonus;
+        // Bit 2 = DIP Lives — défaut hardware = 3 vies (bit=1)
+        if (input.dipsw_lives) v |= 0x04;
         return v;
     }
 
@@ -236,62 +234,65 @@ public:
 
     // ------------------------------------------------------------------------
     // write_hw_reg — Écritures mémoire-mappées ET I/O vers les registres hardware
+    // Décodage séparé /DRIVER (0x6xxx) et /LATCH (0x7xxx) pour éviter collisions.
+    // MAME galaxian.cpp : deux chip-selects distincts sur le vrai hardware.
     // =========================================================================
     void write_hw_reg(uint16_t addr, uint8_t val) {
         // Filtre par plage d'adresse (mémoire ou I/O reconstruite)
         if (addr < 0x6000 || addr >= 0x8000) return;
 
         bool b0 = (val & 1) != 0;
-        
-        // Décodage par bits bas (A0-A3) — fonctionne pour :
-        // - Adresses mémoire complètes (ex: 0x7001 & 0x0F = 0x01)
-        // - Ports I/O reconstruits (ex: 0x6001 & 0x0F = 0x01)
         uint8_t port_low = static_cast<uint8_t>(addr & 0x0F);
+        bool is_latch = (addr & 0x0800) != 0; // true pour 0x7xxx, false pour 0x6xxx
 
-        switch (port_low) {
-            case 0x01:  // 0x7001 / 0x6001 = IRQ enable
-                regs.irq_enabled = b0;
-                if (!b0 && cpu_ptr) {
-                    cpu_ptr->INT_line = false;
-                }
-                break;
+        if (is_latch) {
+            // === Régions /LATCH (0x7000-0x77FF) === MAME galaxian.cpp
+            switch (port_low) {
+                case 0x01:  // 0x7001 = NMI ON (flip-flop D, actif HIGH)
+                    regs.irq_enabled = b0;
+                    if (!b0 && cpu_ptr) cpu_ptr->INT_line = false;
+                    break;
+                case 0x04:  // 0x7004 = Stars enable
+                    regs.star_enable = b0;
+                    break;
+                case 0x06:  // 0x7006 = Flip screen X (mirror 0x07f8)
+                    regs.flip_screen_x = b0;
+                    break;
+                case 0x07:  // 0x7007 = Flip screen Y (mirror 0x07f8)
+                    regs.flip_screen_y = b0;
+                    break;
+                default:
+                    break;
+            }
+        } else {
+            // === Régions /DRIVER (0x6000-0x67FF) === MAME galaxian.cpp
+            switch (port_low) {
+                case 0x01:  // 0x6001 = 2P START LAMP (ignoré sur hardware)
+                    break;
+                case 0x02:  // 0x6002 = Coin lockout
+                    regs.coin_lock = b0;
+                    break;
+                case 0x03:  // 0x6003 = Coin counter (ignoré)
+                    break;
+                case 0x04:  // 0x6004 = Résistance son (555 timer) — ignoré ici
+                    break;
+                case 0x05:  // 0x6005 = Résistance son (555 timer) — ignoré ici
+                    break;
+                case 0x06:  // 0x6006 = Résistance son (555 timer) — ignoré ici
+                    break;
+                case 0x07:  // 0x6007 = Start lamps (ignoré)
+                    break;
+                default:
+                    break;
+            }
+        }
 
-            case 0x04:  // 0x7004 / 0x6004 = stars enable (MAME galaxian.cpp)
-                regs.star_enable = b0;
-                break;
-
-            case 0x02:  // 0x6002 / 0x7002 = coin lockout (ignoré)
-                break;
-
-            // Flip screen X — MAME galaxian.cpp : map(0x7006, 0x7006).mirror(0x07f8)
-            case 0x06:  // 0x7006 / 0x6006 = flip screen
-                regs.flip_screen = b0;
-                break;
-
-            case 0x03:  // 0x6003 / 0x7003 = coin counter (ignoré)
-            case 0x05:  // 0x6005 = sound control
-                if (addr >= 0x6800 && addr < 0x6808) {
-                    audio_synth.write_control(addr, val);
-                } else {
-                    regs.sound_ctrl = val;
-                }
-                break;
-
-            case 0x07:  // 0x6007 / 0x7007 = start lamps (ignoré)
-                break;
-
-            default:
-                // Ports sonores (0x6800-0x6807)
-                if (addr >= 0x6800 && addr < 0x6808) {
-                    audio_synth.write_control(addr, val);
-                    uint8_t reg = addr & 0x07;
-                    if (reg == 3) {
-                        audio_synth.trigger_hit();
-                    } else if (reg == 4) {
-                        audio_synth.trigger_fire();
-                    }
-                }
-                break;
+        // Ports sonores (0x6800-0x6807) — indépendants des régions ci-dessus
+        if (addr >= 0x6800 && addr < 0x6808) {
+            audio_synth.write_control(addr, val);
+            uint8_t reg = addr & 0x07;
+            if (reg == 3) audio_synth.trigger_hit();
+            else if (reg == 4) audio_synth.trigger_fire();
         }
 
         // Pitch register (0x7800) — conservé pour compatibilité
@@ -313,24 +314,22 @@ public:
     }
 
     // ------------------------------------------------------------------------
-    // Watchdog — réarme le compteur quand le Z80 lit 0x7800
+    // Watchdog — MAME : set_vblank_count("screen", 8)
+    // Le Z80 lit 0x7800 pour réarmer. Reset si 8 VBLANK sans lecture.
     // ------------------------------------------------------------------------
     void reset_watchdog() {
-        regs.watchdog_counter = 0;
+        regs.watchdog_vblanks = 0;
     }
 
-    // ------------------------------------------------------------------------
-    // Incrémente le watchdog et retourne true si timeout (reset nécessaire)
-    // Timeout typique : ~16ms = ~50000 cycles à 3MHz
-    // Timeout diagnostic augmenté à 500000 (~160ms, 10 frames) pour permettre au boot de progresser
-    // ------------------------------------------------------------------------
-    bool check_watchdog(int cycles) {
-        regs.watchdog_counter += cycles;
-        // Timeout augmenté : ~500000 cycles ≈ 160ms (10 frames à 60Hz)
-        if (regs.watchdog_counter > 500000) {
-            printf("[WATCHDOG] Timeout — reset CPU (cycles=%u)\n", regs.watchdog_counter);
-            return true;
+    // Appelée à chaque front montant VBLANK (une fois par frame)
+    void tick_watchdog() {
+        regs.watchdog_vblanks++;
+        if (regs.watchdog_vblanks >= WATCHDOG_MAX_VBLANKS) {
+            printf("[WATCHDOG] Timeout — reset CPU (%d VBLANKs sans lecture 0x7800)\n", regs.watchdog_vblanks);
         }
-        return false;
+    }
+
+    bool watchdog_timed_out() const {
+        return regs.watchdog_vblanks >= WATCHDOG_MAX_VBLANKS;
     }
 };

@@ -86,7 +86,9 @@ void DebugUI::draw_cpu_panel(const Z80& cpu, const GalaxianBus& bus) {
 
     ImGui::SeparatorText("Hardware Galaxian");
     ImGui::Text("IRQ  : %s", bus.regs.irq_enabled ? "ON" : "OFF");
-    ImGui::Text("HFLIP/VFLIP: %s", bus.regs.flip_screen ? "ON" : "off");
+    ImGui::Text("HFLIP/VFLIP: X=%s Y=%s",
+        bus.regs.flip_screen_x ? "ON" : "off",
+        bus.regs.flip_screen_y ? "ON" : "off");
     ImGui::Text("Star : %s", bus.regs.star_enable ? "ON" : "off");
     ImGui::Text("Sound: 0x%02X", bus.regs.sound_ctrl);
 

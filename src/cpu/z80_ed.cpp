@@ -849,16 +849,11 @@ int z80_exec_ed(Z80* cpu) {
         case 0x83: return 8;  // NOP (non doc)
 
         // === RETI / RETN — ED 4D / 45 ===
-        case 0x45: { // RETN — Retour de NMI
+        case 0x45: { // RETN — Retour de NMI (consommation du flag NMI_pending)
             uint16_t new_pc = z80_pop_word(cpu);
             cpu->PC = new_pc;
             cpu->WZ = new_pc;
             cpu->IFF1 = cpu->IFF2;
-            if (cpu->nmi_return_fn)
-                cpu->nmi_return_fn();
-            cpu->NMI_in_service = false;
-            printf("[RETN] PC=%04X -> %04X SP=%04X IFF1=%d\n",
-                   cpu->PC, new_pc, cpu->SP, cpu->IFF1 ? 1 : 0);
             return 14;
         }
         case 0x4D: { // RETI — Retour d'interruption maskable

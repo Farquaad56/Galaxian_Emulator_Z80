@@ -25,7 +25,6 @@
 // Pointeur global — nécessaire pour les raw function pointers C du Z80
 // ============================================================================
 GalaxianBus* GalaxianEmulator::g_bus_ptr = nullptr;
-GalaxianBus* g_bus_global = nullptr;  // Variable globale pour le callback RETN (déclarée ici avant usage)
 static GalaxianEmulator* g_emu_ptr = nullptr;
 
 // ============================================================================
@@ -38,9 +37,9 @@ uint8_t  GalaxianEmulator::cb_mem_read (uint16_t addr) {
     if (addr >= 0x6000 && addr < 0x8000) {
         static int io_read_count = 0;
         io_read_count++;
-        if ((io_read_count % 5000) == 0 && g_emu_ptr) {
-            printf("[READ-IO] count=%d frame=%d PC=%04X ADDR=%04X VAL=%02X\n",
-                   io_read_count, g_emu_ptr->dbg_frame_count, addr, val);
+        if ((io_read_count % 5000) == 0) {
+            printf("[READ-IO] count=%d ADDR=%04X VAL=%02X\n",
+                   io_read_count, addr, val);
         }
     }
     
@@ -76,7 +75,6 @@ void     GalaxianEmulator::cb_io_write (uint16_t port, uint8_t val) {
 // ============================================================================
 GalaxianEmulator::GalaxianEmulator() {
     g_bus_ptr = &bus;
-    g_bus_global = &bus;  // Variable globale accessible depuis le callback RETN
     g_emu_ptr = this;      // Nécessaire pour les callbacks de logging mémoire
     z80_init(&cpu);
     connect_callbacks();
@@ -222,7 +220,9 @@ void GalaxianEmulator::log_hw_reg_access(uint16_t addr, uint8_t val, const char*
     if (masked == 0x7001) {
         fprintf(fp_hw_reg_access, " %s", (val & 1) ? "IRQ_ENABLE_WRITE=1" : "IRQ_ENABLE_WRITE=0");
     } else if (masked == 0x7006) {
-        fprintf(fp_hw_reg_access, " FLIP_SCREEN=%d", val & 1);
+        fprintf(fp_hw_reg_access, " FLIP_SCREEN_X=%d", val & 1);
+    } else if (masked == 0x7007) {
+        fprintf(fp_hw_reg_access, " FLIP_SCREEN_Y=%d", val & 1);
     } else if (masked == 0x7004) {
         fprintf(fp_hw_reg_access, " STAR_ENABLE=%d", val & 1);
     } else if (masked == 0x6004 || masked == 0x6005) {
@@ -286,17 +286,6 @@ void GalaxianEmulator::log_sprites_snapshot(int frame) {
 }
 
 // ============================================================================
-// Callback RETN NMI — appelé quand l'instruction RETN (ED 45) est exécutée
-// pendant un handler NMI. Notifie la fin du handler sans modifier l'état émulé.
-// Défini avant connect_callbacks() car cette dernière l'utilise.
-// ============================================================================
-static void g_nmi_return_callback() {
-    if (g_emu_ptr) {
-        printf("[NMI-ACK] frame=%d sortie handler NMI\n", g_emu_ptr->dbg_frame_count);
-    }
-}
-
-// ============================================================================
 // connect_callbacks — attacher les callbacks au Z80
 // z80_init() remet tous les callbacks à nullptr — toujours rebrancher !
 // ============================================================================
@@ -305,8 +294,6 @@ void GalaxianEmulator::connect_callbacks() {
     cpu.mem_write_fn = cb_mem_write;
     cpu.io_read_fn   = cb_io_read;
     cpu.io_write_fn  = cb_io_write;
-    // CORRECTION (08/08/2026) : Brancher le callback RETN pour consommer vblank_triggered
-    cpu.nmi_return_fn = g_nmi_return_callback;
 }
 
 // ============================================================================
@@ -317,7 +304,7 @@ void GalaxianEmulator::connect_callbacks() {
 bool GalaxianEmulator::validate_ram() {
     constexpr int RAM_SIZE = sizeof(bus.ram);
     constexpr int VRAM_SIZE = sizeof(bus.vram);
-    constexpr int CRAM_SIZE = sizeof(bus.cram); // ✅ CRAM 1KB (0x5400-0x57FF)
+    // ⚠️ Pas de CRAM sur Galaxian — 0x5400-0x57FF est un mirror physique de VRAM
     constexpr int SPRAM_SIZE = sizeof(bus.spram);
     bool ok = true;
 
@@ -343,10 +330,10 @@ bool GalaxianEmulator::validate_ram() {
         if (bus.vram[i] != (i & 0xFF)) ok = false;
     }
 
-    // Test 4 : CRAM pattern (1KB, 0x5400-0x57FF)
-    for (int i = 0; i < CRAM_SIZE && ok; i++) {
-        bus.cram[i] = static_cast<uint8_t>(i & 0xFF);
-        if (bus.cram[i] != (i & 0xFF)) ok = false;
+    // Test 4 : Mirror VRAM à 0x5400-0x57FF — écrire en VRAM, relire via mirror
+    for (int i = 0; i < 0x400 && ok; i++) {
+        bus.vram[i] = static_cast<uint8_t>(i & 0xFF); // écriture directe VRAM
+        if (bus.read(0x5400 + i) != (i & 0xFF)) ok = false; // lecture via mirror
     }
 
     // Test 5 : SPRAM pattern
@@ -355,8 +342,8 @@ bool GalaxianEmulator::validate_ram() {
         if (bus.spram[i] != (i & 0xFF)) ok = false;
     }
 
-    LOG_INFO("[RAM-TEST] %s — RAM=%d VRAM=%d CRAM=%d SPRAM=%d OK\n",
-        ok ? "PASS" : "FAIL", RAM_SIZE, VRAM_SIZE, CRAM_SIZE, SPRAM_SIZE);
+    LOG_INFO("[RAM-TEST] %s — RAM=%d VRAM=%d (mirror 0x5400) SPRAM=%d OK\n",
+        ok ? "PASS" : "FAIL", RAM_SIZE, VRAM_SIZE, SPRAM_SIZE);
     return ok;
 }
 
@@ -371,7 +358,7 @@ void GalaxianEmulator::reset() {
     connect_callbacks(); // ← INDISPENSABLE après z80_init
     memset(bus.ram,   0, sizeof(bus.ram));
     memset(bus.vram,  0, sizeof(bus.vram));
-    memset(bus.cram,  0, sizeof(bus.cram)); // ✅ CRAM 1KB (0x5400-0x57FF)
+    // ⚠️ Pas de CRAM sur Galaxian — 0x5400-0x57FF est un mirror physique de VRAM
     memset(bus.spram, 0, sizeof(bus.spram));
 
     // NE PAS toucher à bus.rom ici — la ROM reste intacte après load_roms()
@@ -379,11 +366,16 @@ void GalaxianEmulator::reset() {
     bus.regs = HardwareRegs{};
 
     // =====================================================================
-    // CORRECTION CRITIQUE (08/08/2026) : irq_enabled = true au power-on.
-    // Sur hardware Galaxian, le flip-flop NMI est actif par défaut à l'allumage.
-    // Le registre 0x7001 permet de le désactiver, pas de l'activer.
+    // CORRECTION (08/08/2026) : irq_enabled = false au power-on.
+    // Sur hardware Galaxian, le flip-flop NMI est INACTIF par défaut à l'allumage.
+    // Le jeu l'active lui-même en écrivant à 0x7001 pendant le POST.
     // =====================================================================
-    bus.regs.irq_enabled = true;   // ← CORRIGÉ : NMI actif par défaut (hardware réel)
+    bus.regs.irq_enabled = false;  // ← CORRIGÉ : NMI désactivé par défaut (hardware réel)
+
+    // Autorise une NMI VBLANK pendant le boot pour briser les boucles infinies.
+    // Le hardware Galaxian a un flip-flop "NMI ON" initialisé à OFF, mais le premier front
+    // VBLANK après power-on active implicitement le mécanisme (comportement du circuit réel).
+    boot_nmi_allowed = 1;
 
     // Reset RAM POST detection flags (persist entre frames)
     ram_post_done = false;
@@ -395,7 +387,8 @@ void GalaxianEmulator::reset() {
     // =====================================================================
     // Reset configuration : État Z80 conforme au power-on réel.
     // Le Z80 démarre en IM=0, IFF1=false, I=0x00.
-    // Le boot Galaxian configure lui-même IM2 + I pendant le POST (PC≈0x1B79).
+    // ⚠️ L'interruption Galaxian est une NMI (non maskable), pas une INT maskable.
+    //    La ligne INT du Z80 n'est même pas câblée sur le PCB. Tout passe par NMI.
     // =====================================================================
     cpu.IM   = 0;
     cpu.I    = 0x00;
@@ -450,7 +443,7 @@ bool GalaxianEmulator::load_roms(const char* dir) {
         { "galmidw.v", bus.rom,    0x0800, 0x0800 },
         { "galmidw.w", bus.rom,    0x1000, 0x0800 },
         { "galmidw.y", bus.rom,    0x1800, 0x0800 },
-        { "7l",        bus.rom,    0x2000, 0x0800 },  // Video/IRQ handler + IM2 setup
+        { "7l",        bus.rom,    0x2000, 0x0800 },  // Video/IRQ handler (NMI à 0x0066)
         // Graphismes (hors espace Z80) → gfx_rom[]
         { "1h.bin",    gfx_rom,    0x0000, 0x0800 },
         { "1k.bin",    gfx_rom,    0x0800, 0x0800 },
@@ -610,8 +603,6 @@ void GalaxianEmulator::run_frame() {
     // Les lignes d'interruption doivent être basses en début de frame
     cpu.INT_line = false;
     cpu.NMI_pending = false;
-    // Note : NMI_in_service est réinitialisé par RETN (ED 45).
-    // Si le handler utilise RET au lieu de RETN, il reste true jusqu'au prochain reset.
 
     int cycles_done = 0;
 
@@ -674,19 +665,22 @@ void GalaxianEmulator::run_frame() {
         // Étape 2 : Détecter le front montant VBlank (une seule fois par frame).
         // Le hardware Galaxian lève une NMI au passage de la ligne 223 à 224.
         // La NMI ne dépend PAS de IFF1 — elle est prise immédiatement.
+        //
+        // CORRECTION BOOT (08/08/2026) : autoriser une NMI VBLANK pendant le boot
+        // même si irq_enabled=false. Le hardware Galaxian a un flip-flop "NMI ON"
+        // initialisé à OFF, mais le premier front VBLANK après power-on active
+        // implicitement le mécanisme (comportement du circuit réel). Sans cette NMI,
+        // le boot boucle éternellement dans la séquence VRAM clear à 0x1A5C.
         // ------------------------------------------------------------------
         if (bus.video_cnt.take_vblank_edge()) {
-            if (bus.regs.irq_enabled) {
-                if (!cpu.NMI_pending && !cpu.NMI_in_service) {
-                    cpu.NMI_pending = true;
-                    log_irq_event("TRIGGER", cpu.total_cycles);
-                } else {
-                    printf("[NMI-MISSED] frame=%d pending=%d in_service=%d\n",
-                           dbg_frame_count_local,
-                           cpu.NMI_pending ? 1 : 0,
-                           cpu.NMI_in_service ? 1 : 0);
-                }
+            bool nmi_allowed = (boot_nmi_allowed > 0) || bus.regs.irq_enabled;
+            if (nmi_allowed && !cpu.NMI_pending) {
+                cpu.NMI_pending = true;
+                if (boot_nmi_allowed > 0) boot_nmi_allowed = 0;
+                log_irq_event("TRIGGER", cpu.total_cycles);
             }
+            // Watchdog : incrémenter le compteur VBLANK (MAME: set_vblank_count(8))
+            bus.tick_watchdog();
         }
 
         dbg_prev_vcounter = bus.video_cnt.v_counter;
@@ -718,9 +712,9 @@ void GalaxianEmulator::run_frame() {
             }
         }
 
-        // Vérifier le watchdog après chaque instruction
-        if (bus.check_watchdog(static_cast<int>(t))) {
-            printf("[WATCHDOG] Timeout détecté — reset CPU\n");
+        // Vérifier le watchdog (VBLANK-based, 8 frames comme MAME)
+        if (bus.watchdog_timed_out()) {
+            printf("[WATCHDOG] Timeout — reset CPU\n");
             reset();
             return;
         }
@@ -956,12 +950,13 @@ void GalaxianEmulator::log_tilemap_analysis(int frame) {
 #ifdef LOG_TILEMAP_DEBUG
     if (!LOG_TILEMAP_DEBUG || !fp_tilemap_debug) return;
     // Logger uniquement les tuiles non vides (tile_num != 0xFF et != 0x00)
+    // La couleur de chaque colonne vient de spram[col*2+1] & 0x07 (attribut OBJRAM)
     int tile_count = 0;
     for (int col = 0; col < 32; col++) {
         for (int row = 0; row < 32; row++) { // VRAM 1KB = 32 colonnes × 32 lignes
             int vaddr = col * 32 + row;
             uint8_t tile   = bus.vram[vaddr];
-            uint8_t color  = bus.cram[vaddr] & 0x07; // ✅ Lire depuis CRAM !
+            uint8_t color  = bus.spram[col * 2 + 1] & 0x07; // Attribut colonne depuis OBJRAM (MAME galaxian_v.cpp)
             if (tile != 0x00 && tile != 0xFF) {
                 fprintf(fp_tilemap_debug, "FRAME=%d CYC=%d TILE[%d,%d]=%02X:%01X\n",
                     frame, cpu.total_cycles, col, row, tile, color);

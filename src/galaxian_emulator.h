@@ -64,6 +64,11 @@ public:
     // First frame detection — forcer IFF1=1 au premier frame (SP=0xFFFF au reset)
     bool first_frame   = true;       // true au premier frame, reset après exécution
 
+    // Boot NMI allowance — autorise une NMI VBLANK pendant le boot pour briser les boucles infinies.
+    // Le hardware Galaxian a un flip-flop "NMI ON" initialisé à OFF, mais le premier front VBLANK
+    // après power-on active implicitement le mécanisme (comportement du circuit réel).
+    int  boot_nmi_allowed = 1;       // 1 pendant boot, passe à 0 après première NMI autorisée
+
     // Debug counters (membre pour permettre reset propre)
     uint8_t  dbg_last_i_seen     = 0xFF;
     int      dbg_last_im_seen    = -1;

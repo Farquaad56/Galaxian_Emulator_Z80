@@ -40,8 +40,6 @@ void z80_init(Z80* cpu) {
     cpu->ei_delay = false;
     cpu->INT_line = false;
     cpu->NMI_pending = false;
-    cpu->NMI_in_service = false;
-    cpu->nmi_return_fn = nullptr;
 
     cpu->mem_read_fn = nullptr;
     cpu->mem_write_fn = nullptr;
@@ -325,7 +323,6 @@ void z80_nmi(Z80* cpu) {
     cpu->halted = false;
     cpu->IFF2 = cpu->IFF1;
     cpu->IFF1 = false;
-    cpu->NMI_in_service = true;  // CORRECTION (08/08/2026) : empêche les re-détections
     z80_push_word(cpu, cpu->PC);
     cpu->PC = 0x0066;
     cpu->WZ = 0x0066;
@@ -335,10 +332,9 @@ void z80_nmi(Z80* cpu) {
 int z80_step(Z80* cpu) {
     // ------------------------------------------------------------------
     // NMI : edge-triggered, prioritaire sur INT, ne dépend PAS de IFF1/IM.
-    // CORRECTION (08/08/2026) : si une NMI est déjà en service, on la ignore.
-    // Cela empêche les boucles infinies dues à vblank_triggered non consommé.
+    // Le signal est consommé immédiatement lors de la prise d'interruption.
     // ------------------------------------------------------------------
-    if (cpu->NMI_pending && !cpu->NMI_in_service) {
+    if (cpu->NMI_pending) {
         cpu->NMI_pending = false;
         z80_nmi(cpu);
         return 11; // NMI = 11 T-states (4+5+2)

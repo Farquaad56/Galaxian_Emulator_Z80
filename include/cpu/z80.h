@@ -119,13 +119,6 @@ typedef struct Z80 {
     bool ei_delay;            ///< Délai EI — 1 = interruptions bloquées pendant l'instruction suivant EI
     bool INT_line;            ///< Ligne IRQ matérielle (conservée pour compatibilité, non utilisée par Galaxian)
     bool NMI_pending;         ///< Pulse NMI entre les instructions — edge-triggered, prioritaire sur INT, ne dépend pas de IFF1/IM
-    bool NMI_in_service;      ///< CORRECTION (08/08/2026) : true pendant l'exécution du handler NMI. Empêche les re-détections et NMI imbriquées.
-
-    // ------------------------------------------------------------------------
-    // Callback de sortie NMI — appelé par RETN pour notifier l'hôte
-    // ------------------------------------------------------------------------
-    typedef void (*nmi_return_fn_t)();
-    nmi_return_fn_t  nmi_return_fn;  ///< NULL = pas de callback. Appelé quand RETN est exécuté pendant NMI.
 
     // ------------------------------------------------------------------------
     // Callbacks mémoire et I/O (à définir par l'hôte/émulateur)
