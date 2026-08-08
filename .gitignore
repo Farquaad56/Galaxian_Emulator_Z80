@@ -1,0 +1,35 @@
+# Build directories
+cmake-build-*/
+.vs/
+build/
+
+# IDE
+.idea/
+*.suo
+*.user
+*.sln
+
+# Virtual environment
+.venv/
+__pycache__/
+
+# Logs and temporary files
+*.log
+*.ini
+tmp_log.txt
+
+# ROMs (copyrighted content - do not commit)
+assets/roms/*.bin
+assets/roms/*.bpr
+assets/roms/*.*l
+assets/roms/galmidw.*
+
+# Embedded git repositories in third_party
+third_party/imgui/.git
+third_party/imgui_club/.git
+third_party/raylib/.git
+third_party/rlImGui/.git
+
+# OS files
+.DS_Store
+Thumbs.db

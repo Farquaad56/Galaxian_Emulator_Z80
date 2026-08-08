@@ -1,0 +1,15 @@
+# Galaxian ROMs - Copyright Konami 1979/1980
+# Ces ROMs sont la propriété de Konami et ne doivent pas être distribuées.
+
+# Pour utiliser l'émulateur, placez les fichiers suivants dans ce répertoire :
+#
+# 1h.bin
+# 1k.bin
+# 6l.bpr
+# 7l
+# galmidw.u
+# galmidw.v
+# galmidw.w
+# galmidw.y
+#
+# Vous pouvez obtenir ces ROMs depuis des sources légales comme MAME.

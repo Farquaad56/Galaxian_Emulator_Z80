@@ -1,0 +1,1028 @@
+#include "galaxian_emulator.h"
+#include <cstdio>
+#include <cstring>
+#include <algorithm>
+
+// ============================================================================
+// Flag de debug — désactivé (émulation stable, plus besoin de logs console)
+// Pour réactiver : GALAXIAN_DEBUG_LEVEL = 1 (INFO) ou 2 (VERBOSE)
+// ============================================================================
+#define GALAXIAN_DEBUG_LEVEL 1
+
+#if GALAXIAN_DEBUG_LEVEL >= 2
+#define LOG_VERBOSE(...) printf(__VA_ARGS__)
+#else
+#define LOG_VERBOSE(...) ((void)0)
+#endif
+
+#if GALAXIAN_DEBUG_LEVEL >= 1
+#define LOG_INFO(...) printf(__VA_ARGS__)
+#else
+#define LOG_INFO(...) ((void)0)
+#endif
+
+// ============================================================================
+// Pointeur global — nécessaire pour les raw function pointers C du Z80
+// ============================================================================
+GalaxianBus* GalaxianEmulator::g_bus_ptr = nullptr;
+GalaxianBus* g_bus_global = nullptr;  // Variable globale pour le callback RETN (déclarée ici avant usage)
+static GalaxianEmulator* g_emu_ptr = nullptr;
+
+// ============================================================================
+// Callbacks statiques conformes aux typedefs de z80.h
+// ============================================================================
+uint8_t  GalaxianEmulator::cb_mem_read (uint16_t addr) {
+    uint8_t val = g_bus_ptr->read(addr);
+    
+    // Log des lectures dans la zone I/O (0x6000-0x7FFF) — diagnostic périodique
+    if (addr >= 0x6000 && addr < 0x8000) {
+        static int io_read_count = 0;
+        io_read_count++;
+        if ((io_read_count % 5000) == 0 && g_emu_ptr) {
+            printf("[READ-IO] count=%d frame=%d PC=%04X ADDR=%04X VAL=%02X\n",
+                   io_read_count, g_emu_ptr->dbg_frame_count, addr, val);
+        }
+    }
+    
+    // Watchdog : réarmer le compteur quand on lit 0x7800
+    if (addr >= 0x7800 && addr < 0x8000) {
+        g_bus_ptr->reset_watchdog();
+    }
+    
+    if (g_emu_ptr) g_emu_ptr->log_memory_access(addr, val, "R");
+    return val;
+}
+void     GalaxianEmulator::cb_mem_write(uint16_t addr, uint8_t val) {
+        // Watchpoint 0x401A supprimé — boot stable, bruit inutile
+        // DEBUG POST : surveiller les écritures VRAM[0x01F3] (code d'erreur test mémoire)
+        // POST status écriture VRAM — ciblé sur l'adresse exacte 0x51F3 pour éviter faux positifs RAM.
+        // Supprimé une fois le boot stabilisé (non critique).
+        g_bus_ptr->write(addr, val);
+        if (g_emu_ptr) g_emu_ptr->log_memory_access(addr, val, "W");
+    }
+uint8_t  GalaxianEmulator::cb_io_read  (uint16_t port) { return g_bus_ptr->io_read(port); }
+void     GalaxianEmulator::cb_io_write (uint16_t port, uint8_t val) {
+    // Log des écritures I/O vers les ports hardware
+    // Le Z80 envoie un port 8 bits — reconstruire l'adresse complète pour le log
+    if (g_emu_ptr) {
+        uint16_t addr = 0x6000 | (port & 0xFF);
+        g_emu_ptr->log_hw_reg_access(addr, val, "IO");
+    }
+    g_bus_ptr->io_write(port, val);
+}
+
+// ============================================================================
+// Constructeur — initialisation du Z80 avec callbacks branchés + ouverture logs
+// ============================================================================
+GalaxianEmulator::GalaxianEmulator() {
+    g_bus_ptr = &bus;
+    g_bus_global = &bus;  // Variable globale accessible depuis le callback RETN
+    g_emu_ptr = this;      // Nécessaire pour les callbacks de logging mémoire
+    z80_init(&cpu);
+    connect_callbacks();
+    open_debug_logs(".");
+}
+
+// ============================================================================
+// Destructeur — fermeture des fichiers de log
+// ============================================================================
+GalaxianEmulator::~GalaxianEmulator() {
+    close_debug_logs();
+}
+
+// ============================================================================
+// OUVERTURE DES FICHIERS DE LOG
+// ============================================================================
+void GalaxianEmulator::open_debug_logs(const char* dir) {
+#ifdef LOG_BOOT_TRACE
+    if (LOG_BOOT_TRACE) {
+        char path[512]; snprintf(path, sizeof(path), "%s/Debug_log/boot_opcode_trace.log", dir);
+        fp_boot_trace = fopen(path, "w");
+        if (fp_boot_trace) { setvbuf(fp_boot_trace, nullptr, _IONBF, 0); fputs("# Trace des 512 premiers opcodes Z80 au démarrage\n", fp_boot_trace); fputs("# Format: CYC=xxx PC=xxxx OP=xx SP=xxxx AF=xxxx IM=x I=xx\n", fp_boot_trace); }
+    }
+#endif
+#ifdef LOG_IRQ_EVENTS
+    if (LOG_IRQ_EVENTS) {
+        char path[512]; snprintf(path, sizeof(path), "%s/Debug_log/irq_events.log", dir);
+        fp_irq_events = fopen(path, "w");
+        if (fp_irq_events) { setvbuf(fp_irq_events, nullptr, _IONBF, 0); fputs("# Événements IRQ VBLANK — Trigger/Ack/Taken\n", fp_irq_events); fputs("# Format: [CYC xxxxxxx] EVENT description\n", fp_irq_events); }
+    }
+#endif
+#ifdef LOG_HW_REG_ACCESS
+    if (LOG_HW_REG_ACCESS) {
+        char path[512]; snprintf(path, sizeof(path), "%s/Debug_log/hw_reg_access.log", dir);
+        fp_hw_reg_access = fopen(path, "w");
+        if (fp_hw_reg_access) { setvbuf(fp_hw_reg_access, nullptr, _IONBF, 0); fputs("# Accès hardware 0x6000-0x7FFF — écritures Z80\n", fp_hw_reg_access); fputs("# Format: [CYC xxxxxxx] ADDR=xxxx VAL=%02X TYPE=[WRITE|IO] DESCRIPTION\n", fp_hw_reg_access); }
+    }
+#endif
+#ifdef LOG_VRAM_SNAPSHOTS
+    if (LOG_VRAM_SNAPSHOTS) {
+        char path[512]; snprintf(path, sizeof(path), "%s/Debug_log/vram_snapshots.log", dir);
+        fp_vram_snapshots = fopen(path, "w");
+        if (fp_vram_snapshots) { setvbuf(fp_vram_snapshots, nullptr, _IONBF, 0); fputs("# Captures VRAM/CRAM toutes les 60 frames\n", fp_vram_snapshots); fputs("# Format: FRAME=n CYC=xxxx VRAM[0..15] CRAM[0..15]\n", fp_vram_snapshots); }
+    }
+#endif
+#ifdef LOG_CPU_STATE
+    if (LOG_CPU_STATE) {
+        char path[512]; snprintf(path, sizeof(path), "%s/Debug_log/cpu_state_keymoments.log", dir);
+        fp_cpu_state = fopen(path, "w");
+        if (fp_cpu_state) { setvbuf(fp_cpu_state, nullptr, _IONBF, 0); fputs("# État CPU Z80 aux moments clés\n", fp_cpu_state); fputs("# Format: [CYC xxxxxxx] LABEL PC=xxxx AF=xxxx BC=xxxx DE=xxxx HL=xxxx SP=xxxx I=%02X IM=x F=S?Z?C?H?PV?\n", fp_cpu_state); }
+    }
+#endif
+#ifdef LOG_SPRITES
+    if (LOG_SPRITES) {
+        char path[512]; snprintf(path, sizeof(path), "%s/Debug_log/sprites_log.log", dir);
+        fp_sprites = fopen(path, "w");
+        if (fp_sprites) { setvbuf(fp_sprites, nullptr, _IONBF, 0); fputs("# Position et attributs des 8 sprites toutes les 60 frames\n", fp_sprites); fputs("# Format: FRAME=n CYC=xxxx SPRITE=i Y=%03d(%02X) CODE=%02X ATTR=%02X(X=%03Y:%c%c) X=%03d(%02X)\n", fp_sprites); }
+    }
+#endif
+#ifdef LOG_MEMORY_ACCESS
+    if (LOG_MEMORY_ACCESS) {
+        char path[512]; snprintf(path, sizeof(path), "%s/Debug_log/memory_access.log", dir);
+        fp_memory_access = fopen(path, "w");
+        if (fp_memory_access) { setvbuf(fp_memory_access, nullptr, _IONBF, 0); fputs("# Accès mémoire Z80 — Lecture (R) et Écriture (W)\n", fp_memory_access); fputs("# Format: [CYC xxxxxxx] R/W ADDR=xxxx VAL=%02X\n", fp_memory_access); }
+    }
+#endif
+#ifdef LOG_TILEMAP_DEBUG
+    if (LOG_TILEMAP_DEBUG) {
+        char path[512]; snprintf(path, sizeof(path), "%s/Debug_log/tilemap_debug.log", dir);
+        fp_tilemap_debug = fopen(path, "w");
+        if (fp_tilemap_debug) { setvbuf(fp_tilemap_debug, nullptr, _IONBF, 0); fputs("# Analyse tuilemap — 32x28 tuiles avec couleurs CRAM\n", fp_tilemap_debug); fputs("# Format: FRAME=n CYC=xxxx TILE[x,y]=code:col  (x=col y=row)\n", fp_tilemap_debug); }
+    }
+#endif
+#ifdef LOG_BOOT_SEQUENCE
+    if (LOG_BOOT_SEQUENCE) {
+        char path[512]; snprintf(path, sizeof(path), "%s/Debug_log/boot_sequence.log", dir);
+        fp_boot_sequence = fopen(path, "w");
+        if (fp_boot_sequence) { setvbuf(fp_boot_sequence, nullptr, _IONBF, 0); fputs("# Séquence de boot détaillée — événements clés du POST\n", fp_boot_sequence); fputs("# Format: [CYC xxxxxxx] LABEL PC=xxxx AF=xxxx SP=xxxx I=%02X IM=x\n", fp_boot_sequence); }
+    }
+#endif
+#ifdef LOG_RENDER_DEBUG
+    if (LOG_RENDER_DEBUG) {
+        char path[512]; snprintf(path, sizeof(path), "%s/Debug_log/render_debug.log", dir);
+        fp_render_debug = fopen(path, "w");
+        if (fp_render_debug) { setvbuf(fp_render_debug, nullptr, _IONBF, 0); fputs("# Stats de rendu par frame\n", fp_render_debug); fputs("# Format: FRAME=n CYC=xxxx PIXELS=N SPRITES_ACTIVE=N TILES_NON_EMPTY=N STARS=N EMPTY_FRAME=C\n", fp_render_debug); }
+    }
+#endif
+}
+
+void GalaxianEmulator::close_debug_logs() {
+    if (fp_boot_trace)       { fclose(fp_boot_trace);      fp_boot_trace       = nullptr; }
+    if (fp_irq_events)       { fclose(fp_irq_events);      fp_irq_events       = nullptr; }
+    if (fp_hw_reg_access)    { fclose(fp_hw_reg_access);   fp_hw_reg_access    = nullptr; }
+    if (fp_vram_snapshots)   { fclose(fp_vram_snapshots);  fp_vram_snapshots   = nullptr; }
+    if (fp_cpu_state)        { fclose(fp_cpu_state);       fp_cpu_state        = nullptr; }
+    if (fp_sprites)          { fclose(fp_sprites);         fp_sprites          = nullptr; }
+    if (fp_memory_access)    { fclose(fp_memory_access);   fp_memory_access    = nullptr; }
+    if (fp_tilemap_debug)    { fclose(fp_tilemap_debug);   fp_tilemap_debug    = nullptr; }
+    if (fp_boot_sequence)    { fclose(fp_boot_sequence);   fp_boot_sequence    = nullptr; }
+    if (fp_render_debug)     { fclose(fp_render_debug);    fp_render_debug     = nullptr; }
+}
+
+// ============================================================================
+// HELPERS DE LOGGING
+// ============================================================================
+static inline const char* flag_str(uint8_t f, uint8_t bit, const char* s) {
+    return (f & bit) ? s : "-";
+}
+
+void GalaxianEmulator::log_opcode_trace(uint16_t pc_before, uint8_t opcode, uint16_t pc_after, int tstates) {
+#ifdef LOG_BOOT_TRACE
+    if (!LOG_BOOT_TRACE || !fp_boot_trace || boot_trace_done) return;
+    static int count = 0;
+    fprintf(fp_boot_trace, "CYC=%d PC=%04X OP=%02X SP=%04X AF=%04X IM=%d I=%02X\n",
+        tstates, pc_before, opcode, cpu.SP, cpu.AF, cpu.IM, cpu.I);
+    // DIAG TEMP : 20000 opcodes pour couvrir tout le chemin de boot
+    if (++count >= 20000) { boot_trace_done = true; fclose(fp_boot_trace); fp_boot_trace = nullptr; }
+#endif
+}
+
+void GalaxianEmulator::log_irq_event(const char* event, int cycles) {
+#ifdef LOG_IRQ_EVENTS
+    if (!LOG_IRQ_EVENTS || !fp_irq_events) return;
+    fprintf(fp_irq_events, "[CYC %07d] %-12s", cycles, event);
+    if (strcmp(event, "TRIGGER") == 0)
+        fprintf(fp_irq_events, " VBLANK levé par hardware (v_counter=%d, h_counter=%d)", bus.video_cnt.v_counter, bus.video_cnt.h_counter);
+    else if (strcmp(event, "TAKEN") == 0)
+        fprintf(fp_irq_events, " Z80 a répondu IRQ IM2 → PC=%04X push SP=%04X", cpu.PC, cpu.SP);
+    else if (strcmp(event, "ACK") == 0)
+        fprintf(fp_irq_events, " Jeu acquitte IRQ via écriture 0x7001");
+    fprintf(fp_irq_events, "\n");
+#endif
+}
+
+// NOTE: cette fonction ne doit JAMAIS modifier l'état émulé.
+// irq_enabled est modifié uniquement dans write_hw_reg().
+void GalaxianEmulator::log_hw_reg_access(uint16_t addr, uint8_t val, const char* type_str) {
+#ifdef LOG_HW_REG_ACCESS
+    if (!LOG_HW_REG_ACCESS || !fp_hw_reg_access) return;
+    fprintf(fp_hw_reg_access, "[CYC %07d] ADDR=%04X VAL=%02X TYPE=%s", cpu.total_cycles, addr, val, type_str);
+    // Masque correct selon MAME : 0x07FF (miroir sur bits hauts)
+    uint16_t masked = addr & 0x07FF;
+    if (masked == 0x7001) {
+        fprintf(fp_hw_reg_access, " %s", (val & 1) ? "IRQ_ENABLE_WRITE=1" : "IRQ_ENABLE_WRITE=0");
+    } else if (masked == 0x7006) {
+        fprintf(fp_hw_reg_access, " FLIP_SCREEN=%d", val & 1);
+    } else if (masked == 0x7004) {
+        fprintf(fp_hw_reg_access, " STAR_ENABLE=%d", val & 1);
+    } else if (masked == 0x6004 || masked == 0x6005) {
+        fprintf(fp_hw_reg_access, " SOUND_CTRL=%02X", val);
+    } else {
+        fprintf(fp_hw_reg_access, " UNKNOWN");
+    }
+    fprintf(fp_hw_reg_access, "\n");
+#endif
+}
+
+void GalaxianEmulator::log_vram_snapshot(int frame) {
+#ifdef LOG_VRAM_SNAPSHOTS
+    if (!LOG_VRAM_SNAPSHOTS || !fp_vram_snapshots) return;
+    fprintf(fp_vram_snapshots, "FRAME=%d CYC=%d VRAM=[", frame, cpu.total_cycles);
+    for (int i = 0; i < 128 && i < 0x400; i++) {
+        if (i > 0) fprintf(fp_vram_snapshots, " ");
+        fprintf(fp_vram_snapshots, "%02X", bus.vram[i]);
+    }
+    fprintf(fp_vram_snapshots, "] SPRAM=[");
+    for (int i = 0; i < 16 && i < 64; i++) {
+        if (i > 0) fprintf(fp_vram_snapshots, " ");
+        fprintf(fp_vram_snapshots, "%02X", bus.spram[i]);
+    }
+    fprintf(fp_vram_snapshots, "] star=%d\n", bus.regs.star_enable);
+#endif
+}
+
+void GalaxianEmulator::log_cpu_state_moment(const char* label, int cycles) {
+#ifdef LOG_CPU_STATE
+    if (!LOG_CPU_STATE || !fp_cpu_state) return;
+    fprintf(fp_cpu_state, "[CYC %07d] %-12s PC=%04X AF=%04X BC=%04X DE=%04X HL=%04X SP=%04X I=%02X IM=%d F=%s%s%s%s%s\n",
+        cycles, label, cpu.PC, cpu.AF, cpu.BC, cpu.DE, cpu.HL, cpu.SP, cpu.I, cpu.IM,
+        flag_str(cpu.F, FLAG_S, "S"), flag_str(cpu.F, FLAG_Z, "Z"),
+        flag_str(cpu.F, FLAG_C, "C"), flag_str(cpu.F, FLAG_H, "H"),
+        flag_str(cpu.F, FLAG_PV, "PV"));
+#endif
+}
+
+void GalaxianEmulator::log_sprites_snapshot(int frame) {
+#ifdef LOG_SPRITES
+    if (!LOG_SPRITES || !fp_sprites) return;
+    // Hardware : sprites à 0x5840 (+0x40 par rapport au début de l'OBJRAM)
+    for (int i = 0; i < 8; i++) {
+        int y_off = 0x40 + i * 4;
+        uint8_t sy   = bus.spram[y_off + 0];
+        uint8_t code = bus.spram[y_off + 1];
+        uint8_t attr = bus.spram[y_off + 2];
+        uint8_t sx   = bus.spram[y_off + 3];
+        int screen_y = 255 - sy; // Même formule que render_sprites()
+        int screen_x = sx - 16;
+        // CORRECTED : bits 0=flipX, 1=flipY (hardware Galaxian réel)
+        bool flip_x  = (attr & 0x01) != 0;
+        bool flip_y  = (attr & 0x02) != 0;
+        int  color   = attr & 0x07;
+        fprintf(fp_sprites, "FRAME=%d CYC=%d SPRITE=%d Y=%03d(%02X) CODE=%02X ATTR=%02X(X=%03d Y=%03d F:%c%c) X=%03d(%02X)\n",
+            frame, cpu.total_cycles, i, sy, sy, code, attr, screen_x, screen_y,
+            flip_x ? 'O' : '-', flip_y ? 'O' : '-', sx, sx);
+    }
+#endif
+}
+
+// ============================================================================
+// Callback RETN NMI — appelé quand l'instruction RETN (ED 45) est exécutée
+// pendant un handler NMI. Notifie la fin du handler sans modifier l'état émulé.
+// Défini avant connect_callbacks() car cette dernière l'utilise.
+// ============================================================================
+static void g_nmi_return_callback() {
+    if (g_emu_ptr) {
+        printf("[NMI-ACK] frame=%d sortie handler NMI\n", g_emu_ptr->dbg_frame_count);
+    }
+}
+
+// ============================================================================
+// connect_callbacks — attacher les callbacks au Z80
+// z80_init() remet tous les callbacks à nullptr — toujours rebrancher !
+// ============================================================================
+void GalaxianEmulator::connect_callbacks() {
+    cpu.mem_read_fn  = cb_mem_read;
+    cpu.mem_write_fn = cb_mem_write;
+    cpu.io_read_fn   = cb_io_read;
+    cpu.io_write_fn  = cb_io_write;
+    // CORRECTION (08/08/2026) : Brancher le callback RETN pour consommer vblank_triggered
+    cpu.nmi_return_fn = g_nmi_return_callback;
+}
+
+// ============================================================================
+// validate_ram — Test de validation RAM/VRAM (POST Galaxian)
+// Le Z80 écrit des patterns, relit, et boucle si mismatch.
+// Retourne true if tous les tests passent.
+// ============================================================================
+bool GalaxianEmulator::validate_ram() {
+    constexpr int RAM_SIZE = sizeof(bus.ram);
+    constexpr int VRAM_SIZE = sizeof(bus.vram);
+    constexpr int CRAM_SIZE = sizeof(bus.cram); // ✅ CRAM 1KB (0x5400-0x57FF)
+    constexpr int SPRAM_SIZE = sizeof(bus.spram);
+    bool ok = true;
+
+    // Test 1 : Pattern simple 0x55/0xAA
+    for (int i = 0; i < RAM_SIZE && ok; i++) {
+        bus.ram[i] = 0x55;
+        if (bus.ram[i] != 0x55) ok = false;
+    }
+    for (int i = 0; i < RAM_SIZE && ok; i++) {
+        bus.ram[i] = 0xAA;
+        if (bus.ram[i] != 0xAA) ok = false;
+    }
+
+    // Test 2 : Pattern compteur
+    for (int i = 0; i < RAM_SIZE && ok; i++) {
+        bus.ram[i] = static_cast<uint8_t>(i & 0xFF);
+        if (bus.ram[i] != (i & 0xFF)) ok = false;
+    }
+
+    // Test 3 : VRAM pattern
+    for (int i = 0; i < VRAM_SIZE && ok; i++) {
+        bus.vram[i] = static_cast<uint8_t>(i & 0xFF);
+        if (bus.vram[i] != (i & 0xFF)) ok = false;
+    }
+
+    // Test 4 : CRAM pattern (1KB, 0x5400-0x57FF)
+    for (int i = 0; i < CRAM_SIZE && ok; i++) {
+        bus.cram[i] = static_cast<uint8_t>(i & 0xFF);
+        if (bus.cram[i] != (i & 0xFF)) ok = false;
+    }
+
+    // Test 5 : SPRAM pattern
+    for (int i = 0; i < SPRAM_SIZE && ok; i++) {
+        bus.spram[i] = static_cast<uint8_t>(i & 0xFF);
+        if (bus.spram[i] != (i & 0xFF)) ok = false;
+    }
+
+    LOG_INFO("[RAM-TEST] %s — RAM=%d VRAM=%d CRAM=%d SPRAM=%d OK\n",
+        ok ? "PASS" : "FAIL", RAM_SIZE, VRAM_SIZE, CRAM_SIZE, SPRAM_SIZE);
+    return ok;
+}
+
+// ============================================================================
+// Reset — réinitialisation complète avec validation RAM + surveillance SP
+// CORRECTION (06/08/2026) : État Z80 conforme au power-on réel.
+// Le Z80 démarre en IM=0, IFF1=false, I=0x00.
+// Le boot Galaxian configure lui-même IM2 + I pendant le POST (PC≈0x1B79).
+// ============================================================================
+void GalaxianEmulator::reset() {
+    z80_init(&cpu);
+    connect_callbacks(); // ← INDISPENSABLE après z80_init
+    memset(bus.ram,   0, sizeof(bus.ram));
+    memset(bus.vram,  0, sizeof(bus.vram));
+    memset(bus.cram,  0, sizeof(bus.cram)); // ✅ CRAM 1KB (0x5400-0x57FF)
+    memset(bus.spram, 0, sizeof(bus.spram));
+
+    // NE PAS toucher à bus.rom ici — la ROM reste intacte après load_roms()
+
+    bus.regs = HardwareRegs{};
+
+    // =====================================================================
+    // CORRECTION CRITIQUE (08/08/2026) : irq_enabled = true au power-on.
+    // Sur hardware Galaxian, le flip-flop NMI est actif par défaut à l'allumage.
+    // Le registre 0x7001 permet de le désactiver, pas de l'activer.
+    // =====================================================================
+    bus.regs.irq_enabled = true;   // ← CORRIGÉ : NMI actif par défaut (hardware réel)
+
+    // Reset RAM POST detection flags (persist entre frames)
+    ram_post_done = false;
+    ei_forced     = false;
+    sp_ei_done    = false;
+    first_frame   = true;
+
+
+    // =====================================================================
+    // Reset configuration : État Z80 conforme au power-on réel.
+    // Le Z80 démarre en IM=0, IFF1=false, I=0x00.
+    // Le boot Galaxian configure lui-même IM2 + I pendant le POST (PC≈0x1B79).
+    // =====================================================================
+    cpu.IM   = 0;
+    cpu.I    = 0x00;
+    cpu.IFF1 = false;
+    cpu.IFF2 = false;
+    bus.regs.first_irq_triggered = false;
+
+    star_lfsr = 0x1FFFF;  // Valeur non nulle pour éviter que le LFSR ne se bloque (0 → tous XOR=0)
+    trace_log.clear();
+    boot_trace_done = false;
+    boot_finished = false;
+    memory_access_count = 0;
+    g_opcode_trace_enabled = true;
+    g_opcode_trace_count = 0;
+
+    // Reset des compteurs debug membres
+    dbg_last_i_seen     = 0xFF;
+    dbg_last_im_seen    = -1;
+    dbg_first_call      = true;
+    dbg_run_last_im     = -1;
+    dbg_run_last_i      = 0;
+    dbg_frame_count     = 0;
+    dbg_prev_vcounter   = -1;
+
+    // Reset du compteur vidéo
+    bus.video_cnt.reset_frame();
+
+    LOG_INFO("[RESET] PC=%04X SP=%04X IFF1=%d IM=%d I=%02X\n",
+        cpu.PC, cpu.SP, cpu.IFF1 ? 1 : 0, cpu.IM, cpu.I);
+
+    // Diagnostic ports IN — vérifie décodage et polarité TEST/SERVICE
+    uint8_t in0 = bus.build_in0();
+    LOG_INFO("[PORTS-IN] IN0=%02X IN1=%02X IN2=%02X | TEST=%s SERVICE=%s\n",
+        in0, bus.build_in1(), bus.build_in2(),
+        (in0 & 0x40) ? "OFF" : "ON(!!!)",
+        (in0 & 0x80) ? "RELACHE" : "PRESSE(!!!)");
+
+    // Log initial de l'état CPU
+    log_cpu_state_moment("RESET", 0);
+
+}
+
+// ============================================================================
+// Chargement des ROMs
+// ============================================================================
+struct RomDef { const char* name; uint8_t* dest; uint32_t offset; uint32_t size; };
+
+bool GalaxianEmulator::load_roms(const char* dir) {
+    RomDef defs[] = {
+        // Programme Z80 → bus.rom[] (Namco Set 1)
+        { "galmidw.u", bus.rom,    0x0000, 0x0800 },
+        { "galmidw.v", bus.rom,    0x0800, 0x0800 },
+        { "galmidw.w", bus.rom,    0x1000, 0x0800 },
+        { "galmidw.y", bus.rom,    0x1800, 0x0800 },
+        { "7l",        bus.rom,    0x2000, 0x0800 },  // Video/IRQ handler + IM2 setup
+        // Graphismes (hors espace Z80) → gfx_rom[]
+        { "1h.bin",    gfx_rom,    0x0000, 0x0800 },
+        { "1k.bin",    gfx_rom,    0x0800, 0x0800 },
+        // PROM couleurs 32 octets → color_prom[]
+        { "6l.bpr",    color_prom, 0x0000, 0x0020 },
+    };
+
+    bool ok = true;
+    for (auto& r : defs) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", dir, r.name);
+        FILE* f = fopen(path, "rb");
+        if (!f) {
+            fprintf(stderr, "[ROM] Manquant : %s\n", path);
+            ok = false; continue;
+        }
+        size_t n = fread(r.dest + r.offset, 1, r.size, f);
+        fclose(f);
+        if (n != r.size) {
+            fprintf(stderr, "[ROM] Taille incorrecte : %s\n", r.name);
+            ok = false;
+        } else {
+            printf("[ROM] OK : %-12s  +0x%04X  (%u o)\n", r.name, r.offset, r.size);
+        }
+    }
+    if (ok) {
+        // =====================================================================
+        // Vérification checksum ROM — le POST Galaxian calcule la somme des
+        // octets 0x0000-0x27FF et compare avec 0x00 (test à 0x1B73-0x1B87)
+        // Si la somme n'est pas 0, le boot bouclera en mode échec.
+        // =====================================================================
+        uint8_t rom_sum = 0;
+        for (uint32_t a = 0; a < 0x2800; a++) {
+            rom_sum += bus.rom[a];
+        }
+        if (rom_sum == 0) {
+            printf("[ROM-CHECK] somme(0x0000-0x27FF) = 00 — ROM saine, le boot POST passera\n");
+        } else {
+            printf("[ROM-CHECK] ⚠ somme(0x0000-0x27FF) = %02X — DUMP INVALIDE !\n", rom_sum);
+            printf("[ROM-CHECK]   Le POST va boucler en mode échec (VRAM[0x1F3]=01 ou 02)\n");
+        }
+
+        build_palette();
+        // Remplir la zone ROM non utilisée (0x2800-0x3FFF) avec 0xFF (bus flottant)
+        memset(bus.rom + 0x2800, 0xFF, 0x1800);
+    }
+
+    // Initialiser le pointeur CPU dans le bus (pour ack IRQ)
+    bus.cpu_ptr = &cpu;
+
+    // Ne plus patcher l'ISR — laisser la ROM originale intacte
+    return ok;
+}
+
+// ============================================================================
+// Palette — PROM 6l.bpr → ARGB
+// BUG 1 CORRECTED : Mapping Galaxian réel (confirmé par MAME galaxian.cpp)
+//   bits 2:0 → ROUGE  (3 bits, résistances pondérées 1k/470Ω/220Ω)
+//   bits 5:3 → VERT   (3 bits, mêmes résistances)
+//   bits 7:6 → BLEU   (2 bits, résistances 470Ω/220Ω)
+// ============================================================================
+void GalaxianEmulator::build_palette() {
+    // Résistances pondérées normalisées 0-255 pour 3 bits (8 niveaux)
+    static const uint8_t lut3[8] = { 0x00, 0x24, 0x49, 0x6D, 0x92, 0xB6, 0xDB, 0xFF };
+    // Résistances pondérées normalisées 0-255 pour 2 bits (4 niveaux)
+    static const uint8_t lut2[4] = { 0x00, 0x55, 0xAA, 0xFF };
+
+    for (int i = 0; i < 32; i++) {
+        uint8_t p = color_prom[i];
+        uint8_t r = lut3[(p >> 0) & 0x07];   // bits 2:0 → Rouge (CORRIGÉ)
+        uint8_t g = lut3[(p >> 3) & 0x07];   // bits 5:3 → Vert (CORRIGÉ)
+        uint8_t b = lut2[(p >> 6) & 0x03];   // bits 7:6 → Bleu (CORRIGÉ)
+        palette[i] = (static_cast<uint32_t>(0xFFu) << 24) | (static_cast<uint32_t>(r) << 16) | (static_cast<uint32_t>(g) << 8) | static_cast<uint32_t>(b); // ARGB
+    }
+
+    LOG_INFO("[PALETTE] Corrigée — mapping Galaxian réel (RGB 3-3-2 bits)\n");
+}
+
+// ============================================================================
+// Décodage pixel de tuile — 2 plans de bits, 16 octets/tuile
+// Plan 0 (bit LSB) : octets [0-7]
+// Plan 1 (bit MSB) : octets [8-15]
+// ============================================================================
+uint8_t GalaxianEmulator::decode_pixel(uint8_t tile_num, int px, int py) const {
+    int base   = tile_num * 16;
+    int bit    = 7 - px;                        // pixel 0 = bit MSB (gauche)
+    uint8_t p0 = (gfx_rom[base     + py] >> bit) & 1;
+    uint8_t p1 = (gfx_rom[base + 8 + py] >> bit) & 1;
+    return (p1 << 1) | p0;                      // valeur 0–3
+}
+
+// ============================================================================
+// trace_cpu_state — logger l'état du CPU dans trace_log
+// NE LOGUE QU'UNE FOIS AU DEMARRAGE (pas par frame)
+// ============================================================================
+void GalaxianEmulator::trace_cpu_state() {
+    // Ne loguer que les 50000 premiers cycles TOTAUX (pas par frame)
+    if (cpu.total_cycles > 50000 * 4) return; // ~200000 T-states max
+    if (trace_log.size() >= 50000) return;
+
+    CycleTrace t;
+    t.pc       = cpu.PC;
+    t.opcode   = bus.read(cpu.PC);     // opcode en cours (prochain à exécuter)
+    t.af       = cpu.AF;
+    t.bc       = cpu.BC;
+    t.de       = cpu.DE;
+    t.hl       = cpu.HL;
+    t.sp       = cpu.SP;
+    t.total_cycles = cpu.total_cycles;
+    trace_log.push_back(t);
+
+    // Log console pour les 200 premiers cycles seulement (niveau verbose)
+    if (trace_log.size() <= 200) {
+        LOG_VERBOSE("[TRACE] #%03d PC=%04X OP=%02X AF=%04X BC=%04X DE=%04X HL=%04X SP=%04X CYC=%d\n",
+            (int)trace_log.size(), t.pc, t.opcode, t.af, t.bc, t.de, t.hl, t.sp, t.total_cycles);
+    }
+}
+
+// ============================================================================
+// is_stuck — true si le CPU est bloqué dans une boucle
+// ============================================================================
+bool GalaxianEmulator::is_stuck() const {
+    if (trace_log.size() < 50) return false;
+
+    uint16_t last_pc = trace_log.back().pc;
+    int same_count = 0;
+    for (int i = (int)trace_log.size() - 1; i >= (int)trace_log.size() - 200 && i >= 0; i--) {
+        if (trace_log[i].pc == last_pc) same_count++;
+    }
+    return same_count >= 150;
+}
+
+// ============================================================================
+// run_frame — boucle temporelle Galaxian avec IRQ GAL84Bxx ONE-SHOT VBLANK
+//
+// CORRECTIONS (06/08/2026) :
+//   - Bug #1 : ROM linéaire 16 KB (plus de miroir)
+//   - Bug #2 : pas d'interception IM2 dans le bus
+//   - Bug #3 : detect_im2_config() supprimée
+//   - Bug #4 : reset() — État Z80 conforme au power-on réel
+//   - Bug #8 : VBLANK à la ligne 224 (plus 240)
+//   - Le jeu configure lui-même IM2 + I pendant le boot (PC≈0x1B79).
+// ============================================================================
+void GalaxianEmulator::run_frame() {
+    // Timing Galaxian exact :
+    // CPU clock     : 3.072 MHz = 18.432 / 6
+    // Pixel clock   : 6.144 MHz = 18.432 / 3 (2× CPU clock)
+    // V-total       : 264 scanlines (224 visibles + 40 blanking)
+    // FPS           : ~60.6 Hz
+    // Cycles/frame  : 3.072 MHz / 60.6 ≈ 50685 T-states CPU
+    // 264 lignes × 384 pixels / 2 (pixel clock = 2× CPU clock) = 50688 cycles/frame
+    constexpr int CYCLES_FRAME = 264 * 384 / 2; // 50688
+
+    // Reset du compteur vidéo + vblank_triggered au début de chaque frame
+    bus.video_cnt.reset_frame();
+
+    // Les lignes d'interruption doivent être basses en début de frame
+    cpu.INT_line = false;
+    cpu.NMI_pending = false;
+    // Note : NMI_in_service est réinitialisé par RETN (ED 45).
+    // Si le handler utilise RET au lieu de RETN, il reste true jusqu'au prochain reset.
+
+    int cycles_done = 0;
+
+    // NOTE : first_frame est un membre de classe qui persiste entre frames.
+    // Le jeu Galaxian configure lui-même I + IM2 + EI au boot (PC≈0x1B79).
+    // On ne force RIEN — on laisse le jeu faire son travail.
+    // local_first_frame non utilisée — supprimée.
+
+    // Debug : tracer les changements de IM et I (configuration IM2 par le jeu)
+    int dbg_run_last_im_local = dbg_run_last_im;
+    uint8_t dbg_run_last_i_local = dbg_run_last_i;
+    int dbg_frame_count_local = dbg_frame_count;
+
+    // BUG cosmétique : initialiser à la première vérification pour éviter faux changement au boot
+    if (dbg_run_last_im_local == -1) {
+        dbg_run_last_im_local = cpu.IM;
+        dbg_run_last_i_local  = cpu.I;
+    } else {
+        if (cpu.IM != dbg_run_last_im_local) {
+            LOG_INFO("[CPU] IM changé: %d -> %d à PC=%04X cycles=%d\n", dbg_run_last_im_local, cpu.IM, cpu.PC, cpu.total_cycles);
+            log_cpu_state_moment("IM_CHANGE", cpu.total_cycles);
+#ifdef LOG_BOOT_SEQUENCE
+            if (!boot_finished) {
+                log_boot_sequence_event("IM_CHANGED", cpu.total_cycles);
+                boot_finished = true;
+            }
+#endif
+            dbg_run_last_im_local = cpu.IM;
+        }
+        if (cpu.I != dbg_run_last_i_local) {
+            LOG_INFO("[CPU] I changé: %02X -> %02X à PC=%04X\n", dbg_run_last_i_local, cpu.I, cpu.PC);
+#ifdef LOG_BOOT_SEQUENCE
+            if (!boot_finished) log_boot_sequence_event("I_REGISTER", cpu.total_cycles);
+#endif
+            dbg_run_last_i_local = cpu.I;
+        }
+    }
+
+    while (cycles_done < CYCLES_FRAME) {
+
+        // ------------------------------------------------------------------
+        // Étape 1 : Avancer le compteur vidéo pour un petit bloc (~50 cycles)
+        //          On avance d'abord le vidéo, puis on détecte VBLANK.
+        // ------------------------------------------------------------------
+        int remaining = CYCLES_FRAME - cycles_done;
+        int block_cycles = std::min(50, remaining);
+
+        // Avancer le vidéo pour ce bloc : 1 cycle CPU = 2 cycles pixel
+        bus.video_cnt.step(block_cycles * 2);
+
+        // ------------------------------------------------------------------
+        // Étape 2 : Détecter VBLANK — marquer que l'INT doit être levée.
+        // Le hardware Galaxian lève l'INT VBLANK quand v_counter atteint 224.
+        // ------------------------------------------------------------------
+        if (dbg_prev_vcounter >= 0 && bus.video_cnt.v_counter < dbg_prev_vcounter) {
+            LOG_VERBOSE("[FRAME-RESET] Wrap détecté\n");
+        }
+
+        // ------------------------------------------------------------------
+        // Étape 2 : Détecter le front montant VBlank (une seule fois par frame).
+        // Le hardware Galaxian lève une NMI au passage de la ligne 223 à 224.
+        // La NMI ne dépend PAS de IFF1 — elle est prise immédiatement.
+        // ------------------------------------------------------------------
+        if (bus.video_cnt.take_vblank_edge()) {
+            if (bus.regs.irq_enabled) {
+                if (!cpu.NMI_pending && !cpu.NMI_in_service) {
+                    cpu.NMI_pending = true;
+                    log_irq_event("TRIGGER", cpu.total_cycles);
+                } else {
+                    printf("[NMI-MISSED] frame=%d pending=%d in_service=%d\n",
+                           dbg_frame_count_local,
+                           cpu.NMI_pending ? 1 : 0,
+                           cpu.NMI_in_service ? 1 : 0);
+                }
+            }
+        }
+
+        dbg_prev_vcounter = bus.video_cnt.v_counter;
+
+        // ------------------------------------------------------------------
+        // Étape 3 : Exécuter le Z80
+        //          La NMI est gérée en premier dans z80_step() (prioritaire, ignore IFF1).
+        //          Le handler NMI Galaxian est à l'adresse 0x0066.
+        // ------------------------------------------------------------------
+        uint32_t t = z80_step(&cpu);
+
+        // Diagnostic : logger les instructions autour de 0x1A65 (boucle suspecte)
+        if (cpu.PC >= 0x1A60 && cpu.PC <= 0x1A70) {
+            static int wait_loop_count = 0;
+            static uint16_t last_pc_diagnostic = 0xFFFF;
+            if (last_pc_diagnostic != cpu.PC) {
+                wait_loop_count = 0;
+                last_pc_diagnostic = cpu.PC;
+            }
+            wait_loop_count++;
+            // Logger les 30 passages maximum pour ne pas surcharger la sortie
+            if (wait_loop_count <= 30) {
+                uint8_t op = bus.read(cpu.PC);
+                printf("[WAIT-LOOP] #%d PC=%04X OP=%02X AF=%04X BC=%04X DE=%04X HL=%04X SP=%04X IFF1=%d NMI_pend=%d\n",
+                       wait_loop_count, cpu.PC, op, cpu.AF, cpu.BC, cpu.DE, cpu.HL, cpu.SP,
+                       cpu.IFF1 ? 1 : 0, cpu.NMI_pending ? 1 : 0);
+            } else if (wait_loop_count == 31) {
+                printf("[WAIT-LOOP] ... (suite masquée après 30 passages)\n");
+            }
+        }
+
+        // Vérifier le watchdog après chaque instruction
+        if (bus.check_watchdog(static_cast<int>(t))) {
+            printf("[WATCHDOG] Timeout détecté — reset CPU\n");
+            reset();
+            return;
+        }
+        
+        cpu.total_cycles += static_cast<int>(t);
+        cycles_done     += static_cast<int>(t);
+
+        // Ring buffer diagnostic reboot loop — 64 dernières instructions
+        ring_pc[ring_idx] = cpu.PC;
+        ring_op[ring_idx] = bus.read(cpu.PC);
+        ring_idx = (ring_idx + 1) & 63;
+
+        if (cpu.PC >= 0x2000 && cpu.PC < 0x4000) seen_main = true;
+        if (seen_main && cpu.PC < 0x0010) {
+            seen_main = false;
+        }
+
+        // ------------------------------------------------------------------
+        // Étape 4 : Trace les 500 premiers cycles TOTAUX (debug)
+        // ------------------------------------------------------------------
+        if (cpu.total_cycles <= 50000 && g_opcode_trace_count < MAX_OPCODE_TRACE) {
+            // Logger dans le fichier de log boot opcode (seul système activé)
+            if (fp_boot_trace && !boot_trace_done) {
+                log_opcode_trace(cpu.PC, bus.read(cpu.PC), cpu.PC, static_cast<int>(t));
+            }
+        }
+    }
+
+    // Incrémenter le compteur de frames.
+    dbg_frame_count_local++;
+    dbg_frame_count = dbg_frame_count_local;
+    log_frame_count = dbg_frame_count_local;
+
+    // ------------------------------------------------------------------
+    // Log périodique — RENDER toutes les 300 frames
+    // ------------------------------------------------------------------
+    if (dbg_frame_count_local > 0 && dbg_frame_count_local % 300 == 0) {
+        bool has_pixels = false;
+        for (int i = 0; i < 256 * 224 && !has_pixels; i++) {
+            if (framebuffer[i] != 0) has_pixels = true;
+        }
+        LOG_INFO("[RENDER] Frame %d: framebuffer %s | VRAM[0]=%02X SPRAM[0]=%02X\n",
+            dbg_frame_count_local, has_pixels ? "a des pixels" : "vide", bus.vram[0], bus.spram[0]);
+    }
+
+    // Logger les snapshots périodiques (toutes les 60 frames)
+    if (dbg_frame_count_local > 0 && dbg_frame_count_local % 60 == 0) {
+        log_vram_snapshot(dbg_frame_count_local);
+        log_sprites_snapshot(dbg_frame_count_local);
+#ifdef LOG_TILEMAP_DEBUG
+        log_tilemap_analysis(dbg_frame_count_local);
+#endif
+    }
+
+    // ------------------------------------------------------------------
+    // Étape 6 : Mise à jour du LFSR audio (synchronisé avec le vidéo)
+    // ------------------------------------------------------------------
+    bus.update_audio_lfsr(star_lfsr);
+
+    // ------------------------------------------------------------------
+    // Étape 7 : Rendu de la frame
+    // ------------------------------------------------------------------
+    dbg_run_last_im = dbg_run_last_im_local;
+    dbg_run_last_i  = dbg_run_last_i_local;
+    render_frame();
+}
+
+// ============================================================================
+// render_frame — ordre des couches (back → front)
+// ============================================================================
+void GalaxianEmulator::render_frame() {
+    memset(framebuffer, 0, sizeof(framebuffer));
+    render_stars();     // Couche la plus en arrière
+    render_tilemap();   // Fond de jeu
+    render_sprites();   // Objets mobiles (par-dessus)
+}
+
+// ============================================================================
+// render_stars — LFSR 17 bits : x^17 + x^14 + 1 (code MAME galaxian_v.cpp)
+// Période : 2^17 - 1 = 131071 clocks par frame (512×256 = 131072 → 1 décalage)
+// Condition d'affichage : bits supérieurs = 1, bit 0 = 0
+// Couleur : 6 bits (~shiftreg & 0x1F8) >> 3
+// ============================================================================
+void GalaxianEmulator::render_stars() {
+    if (!bus.regs.star_enable) return;
+
+    uint32_t shiftreg = star_lfsr;
+
+    // Clock le LFSR pour toute la frame (512 pixels × 256 lignes = 131072 clocks)
+    for (int clock = 0; clock < 512 * 256; clock++) {
+        // Feedback LFSR selon MAME
+        uint32_t feedback = ((shiftreg >> 12) ^ ~shiftreg) & 1;
+        shiftreg = (shiftreg >> 1) | (feedback << 16);
+
+        // Calculer position écran
+        int y = clock / 512;
+        int x = clock % 512;
+
+        // Dessiner seulement si dans zone visible
+        if (y < 224 && x < 256) {
+            // Condition d'affichage étoile
+            if ((shiftreg & 0x1FE01) == 0x1FE00) {
+                // Couleur 6 bits selon MAME
+                int color = (~shiftreg & 0x1F8) >> 3;
+
+                // Palette : étoiles utilisent couleurs 16-31
+                if (color < 16) {
+                    framebuffer[y * 256 + x] = palette[16 + color];
+                }
+            }
+        }
+    }
+    star_lfsr = shiftreg;
+}
+
+// ============================================================================
+// render_tilemap — VRAM organisée en COLONNES d'abord : addr = col*32+row
+// ⚠ NE PAS confondre avec row*32+col
+// ============================================================================
+void GalaxianEmulator::render_tilemap() {
+    // La VRAM contient les tuiles, les attributs (couleur + scroll Y) sont dans OBJRAM (SPRAM).
+    for (int col = 0; col < 32; col++) {
+        // Scroll Y de la colonne (octet pair de spram)
+        int scroll_y = bus.spram[col * 2];
+        // Couleur de la colonne (octet impair de spram, bits 2:0)
+        uint8_t color = bus.spram[col * 2 + 1] & 0x07;
+        
+        // ✅ CORRECTION 1 : Itérer sur les 32 lignes de la VRAM (256 pixels de haut)
+        for (int row = 0; row < 32; row++) { 
+            int vaddr = (col * 32 + row) & 0x03FF; // Masquage pour VRAM 1KB (0x5000-0x53FF)
+            uint8_t tile_num = bus.vram[vaddr];
+            
+            for (int py = 0; py < 8; py++) {
+                for (int px = 0; px < 8; px++) {
+                    uint8_t pix = decode_pixel(tile_num, px, py);
+                    if (pix == 0) continue; // pixel transparent
+                    
+                    int sx = col * 8 + px;
+                    int sy = row * 8 + py - scroll_y; // appliquer le scroll Y de la colonne
+                    
+                    // ✅ CORRECTION 2 : Wrap sur 256 pixels (taille réelle de la VRAM hardware)
+                    sy = (sy + 256) & 0xFF; 
+                    
+                    // Si la ligne tombe dans la zone VBLANK (224 à 255), on ne la dessine pas
+                    if (sy >= 224) continue;  
+                    
+                    if (sx >= 256) continue;
+                    
+                    framebuffer[sy * 256 + sx] = palette[color * 4 + pix];
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// render_sprites — 8 sprites 16×16 pixels, OBJRAM à 0x5840
+// Layout OBJRAM (4 octets × 8 sprites = 32 octets) :
+//   +0 : raw_y (inversé CRT : screen_y = 255 - raw_y)
+//   +1 : tile_index (6 bits, bits 5:0) → base_tile = index * 4
+//   +2 : attributs — bits 7:6 = priority, bits 5:0 = couleur
+//        bits 0 = flipX, bit 1 = flipY
+//   +3 : raw_x (screen_x = val + 1)
+// ============================================================================
+void GalaxianEmulator::render_sprites() {
+    // Rendu de 7 à 0 (sprite 0 a la priorité haute)
+    for (int i = 7; i >= 0; i--) {
+        const uint8_t* s = &bus.spram[0x40 + i * 4];
+
+        // Y inversé — repère CRT vertical Galaxian
+        int sy = 255 - static_cast<int>(s[0]);
+
+        // Tile index (6 bits, bits 5:0 du byte 1)
+        uint8_t tile_idx = s[1] & 0x3F;
+
+        // Attributs (byte 2) : couleur + flip flags
+        uint8_t attr     = s[2];
+        int color        = attr & 0x07;          // bits 2:0
+        bool flipX       = (attr & 0x01) != 0;   // bit 0
+        bool flipY       = (attr & 0x02) != 0;   // bit 1
+
+        // X avec offset +1
+        int sx = static_cast<int>(s[3]) + 1;
+
+        // Sprite 16×16 = 4 tuiles de 8×8 arrangées en 2×2
+        int base_tile = tile_idx * 4;
+        static const int QOX[4] = {0, 8, 0, 8};
+        static const int QOY[4] = {0, 0, 8, 8};
+
+        for (int q = 0; q < 4; q++) {
+            uint8_t tile_num = static_cast<uint8_t>(base_tile + q);
+            int ox = QOX[q];
+            int oy = QOY[q];
+
+            for (int py = 0; py < 8; py++) {
+                for (int px = 0; px < 8; px++) {
+                    uint8_t pix = decode_pixel(tile_num, px, py);
+                    if (pix == 0) continue;   // Transparence
+
+                    int draw_px = flipX ? (7 - px) : px;
+                    int draw_py = flipY ? (7 - py) : py;
+
+                    int fx = sx + ox + draw_px;
+                    int fy = sy + oy + draw_py;
+
+                    if (fx < 0 || fx >= 256 || fy < 0 || fy >= 224) continue;
+
+                    framebuffer[fy * 256 + fx] = palette[color * 4 + pix];
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// log_memory_access — Accès mémoire Z80 (Lecture/Écriture)
+// Logué dans le callback cb_mem_read et cb_mem_write
+// ============================================================================
+void GalaxianEmulator::log_memory_access(uint16_t addr, uint8_t val, const char* type) {
+#ifdef LOG_MEMORY_ACCESS
+    if (!LOG_MEMORY_ACCESS || !fp_memory_access) return;
+    if (memory_access_count >= 10000) return; // Limite pour éviter saturation
+    fprintf(fp_memory_access, "[CYC %07d] %c ADDR=%04X VAL=%02X\n", cpu.total_cycles, *type, addr, val);
+    memory_access_count++;
+#endif
+}
+
+// ============================================================================
+// log_tilemap_analysis — Analyse complète de la tuilemap (32x28 tuiles)
+// Loguée toutes les 60 frames pour suivre l'évolution du framebuffer tilemap
+// ============================================================================
+void GalaxianEmulator::log_tilemap_analysis(int frame) {
+#ifdef LOG_TILEMAP_DEBUG
+    if (!LOG_TILEMAP_DEBUG || !fp_tilemap_debug) return;
+    // Logger uniquement les tuiles non vides (tile_num != 0xFF et != 0x00)
+    int tile_count = 0;
+    for (int col = 0; col < 32; col++) {
+        for (int row = 0; row < 32; row++) { // VRAM 1KB = 32 colonnes × 32 lignes
+            int vaddr = col * 32 + row;
+            uint8_t tile   = bus.vram[vaddr];
+            uint8_t color  = bus.cram[vaddr] & 0x07; // ✅ Lire depuis CRAM !
+            if (tile != 0x00 && tile != 0xFF) {
+                fprintf(fp_tilemap_debug, "FRAME=%d CYC=%d TILE[%d,%d]=%02X:%01X\n",
+                    frame, cpu.total_cycles, col, row, tile, color);
+                tile_count++;
+            }
+        }
+    }
+    if (tile_count == 0) {
+        fprintf(fp_tilemap_debug, "FRAME=%d CYC=%d EMPTY_TILEMAP\n", frame, cpu.total_cycles);
+    }
+#endif
+}
+
+// ============================================================================
+// log_boot_sequence_event — Événement critique de la séquence de boot
+// Logué pour suivre les changements d'état du CPU pendant le POST
+// ============================================================================
+void GalaxianEmulator::log_boot_sequence_event(const char* label, int cycles) {
+#ifdef LOG_BOOT_SEQUENCE
+    if (!LOG_BOOT_SEQUENCE || !fp_boot_sequence) return;
+    fprintf(fp_boot_sequence, "[CYC %07d] %-20s PC=%04X AF=%04X SP=%04X I=%02X IM=%d\n",
+        cycles, label, cpu.PC, cpu.AF, cpu.SP, cpu.I, cpu.IM);
+#endif
+}
+
+// ============================================================================
+// log_render_stats — Statistiques de rendu par frame
+// Comptage des pixels actifs, sprites, tuiles non vides, étoiles
+// ============================================================================
+void GalaxianEmulator::log_render_stats(int frame) {
+#ifdef LOG_RENDER_DEBUG
+    if (!LOG_RENDER_DEBUG || !fp_render_debug) return;
+
+    // Compter les pixels actifs dans le framebuffer
+    int active_pixels = 0;
+    for (int i = 0; i < 256 * 224; i++) {
+        if (framebuffer[i] != 0) active_pixels++;
+    }
+
+    // Hardware : sprites à 0x5840 (+0x40 par rapport au début de l'OBJRAM)
+    int active_sprites = 0;
+    for (int i = 0; i < 8; i++) {
+        uint8_t code = bus.spram[0x40 + i * 4 + 1];
+        if (code != 0xFF && code != 0x00) active_sprites++;
+    }
+
+    // Compter les tuiles non vides dans la tilemap
+    int empty_tiles = 0;
+    for (int i = 0; i < 32 * 28; i++) {
+        if (bus.vram[i] == 0x00 || bus.vram[i] == 0xFF) empty_tiles++;
+    }
+    int non_empty_tiles = (32 * 28) - empty_tiles;
+
+    // Détection étoiles actives
+    bool stars_active = bus.regs.star_enable && (star_lfsr & 0xFF) == 0xFF;
+
+    // Frame vide ?
+    bool is_empty = (active_pixels == 0);
+
+    fprintf(fp_render_debug, "FRAME=%d CYC=%d PIXELS=%d SPRITES_ACTIVE=%d TILES_NON_EMPTY=%d STARS=%c EMPTY_FRAME=%c\n",
+        frame, cpu.total_cycles, active_pixels, active_sprites, non_empty_tiles,
+        stars_active ? 'Y' : 'N', is_empty ? 'Y' : 'N');
+#endif
+}
