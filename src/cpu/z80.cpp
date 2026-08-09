@@ -330,11 +330,55 @@ void z80_nmi(Z80* cpu) {
 }
 
 int z80_step(Z80* cpu) {
+    // ====================================================================
+    // ÉTAPE 1 : Sauvegarder l'état ei_delay pour ce step
+    // Un Z80 réel n'accepte PAS les interruptions pendant l'instruction
+    // qui suit EI — elle s'exécute intégralement avec IFF1/IFF2 désactivés.
+    // ====================================================================
+    bool was_ei_delay = cpu->ei_delay;
+
+    // ====================================================================
+    // ÉTAPE 2 : Gestion des interruptions (NMI prioritaire, puis INT)
+    // UNIQUEMENT si ei_delay n'est PAS actif — sinon l'instruction suivante
+    // doit s'exécuter sans être interrompue (comportement Z80 datasheet).
+    // ====================================================================
+    if (!was_ei_delay) {
+        // NMI : edge-triggered, prioritaire sur INT, indépendant de IFF1/IM
+        if (cpu->NMI_pending) {
+            cpu->NMI_pending = false;
+            z80_nmi(cpu);
+            return 11;  // NMI = 11 T-states (4+5+2)
+        }
+
+        // INT maskable : dépend de IFF1 et du mode IM
+        if (cpu->INT_line && cpu->IFF1) {
+            cpu->halted = false;
+            z80_interrupt(cpu, 0xFF);  // Galaxian : bus data = 0xFF (RST 38h)
+            cpu->INT_line = false;
+            return (cpu->IM == 2) ? 19 : 13;
+        }
+    }
+
+    // ====================================================================
+    // ÉTAPE 3 : Clear ei_delay AVANT exécution de l'opcode
+    // Si l'opcode qui suit s'avère être un autre EI, il repositionnera
+    // ei_delay = true dans l'opcode handler lui-même.
+    // ====================================================================
+    if (was_ei_delay) {
+        cpu->ei_delay = false;
+    }
+
+    // ====================================================================
+    // ÉTAPE 4 : HALT — CPU en pause jusqu'à INT/NMI
+    // ====================================================================
     if (cpu->halted) {
         cpu->R = (cpu->R & 0x80) | ((cpu->R + 1) & 0x7F);
         return 4;
     }
 
+    // ====================================================================
+    // ÉTAPE 5 : Fetch + exécution de l'opcode
+    // ====================================================================
     uint8_t opcode = z80_fetch_byte(cpu);
 
     int cycles = 0;
@@ -346,41 +390,20 @@ int z80_step(Z80* cpu) {
         default:   cycles = z80_exec_main(cpu, opcode); break;
     }
 
+    // ====================================================================
+    // ÉTAPE 6 : APRÈS exécution, activer IFF1/IFF2 si ei_delay était vrai
+    // — mais SEULEMENT si l'opcode exécuté n'était pas un autre EI
+    // (qui aurait repositionné ei_delay = true).
+    // ====================================================================
+    if (was_ei_delay && !cpu->ei_delay) {
+        cpu->IFF1 = true;
+        cpu->IFF2 = true;
+    }
+
     // Enregistrer pc_after dans le traceur d'opcodes
     if (g_opcode_trace_enabled && g_opcode_trace_count > 0) {
         g_opcode_trace[g_opcode_trace_count - 1].pc_after = cpu->PC;
         g_opcode_trace[g_opcode_trace_count - 1].tstates = cycles;
-    }
-
-    // NMI : edge-triggered, prioritaire sur INT, ne dépend PAS de IFF1/IM.
-    // Elle ne peut être servie qu'APRÈS une instruction complète.
-    if (cpu->NMI_pending) {
-        cpu->NMI_pending = false;
-        z80_nmi(cpu);
-        return 11; // NMI = 11 T-states (4+5+2)
-    }
-
-    // INT maskable : échantillonnage conforme Z80 datasheet.
-    // Galaxian utilise une INT maskable pilotée par VBLANK via irq_enabled.
-    // ------------------------------------------------------------------
-    if (cpu->INT_line && cpu->IFF1) {
-        cpu->halted = false;
-        z80_interrupt(cpu, 0xFF);
-        cpu->INT_line = false;
-        return (cpu->IM == 2) ? 19 : 13;
-    }
-
-    // ------------------------------------------------------------------
-    // EI délai : sur Z80 réel, EI active IFF1/IFF2 APRÈS l'exécution
-    // complète de l'instruction suivante. L'instruction suivant EI s'exécute
-    // intégralement avec les INT désactivées (IFF1=0). C'est seulement à la
-    // fin de ce step que ei_delay est résolu, permettant aux INT d'être
-    // acceptées au prochain cycle.
-    // ------------------------------------------------------------------
-    if (cpu->ei_delay) {
-        cpu->ei_delay = false;
-        cpu->IFF1 = true;
-        cpu->IFF2 = true;
     }
 
     return cycles;

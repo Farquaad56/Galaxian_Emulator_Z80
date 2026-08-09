@@ -361,8 +361,6 @@ void GalaxianEmulator::reset() {
 
     // Reset RAM POST detection flags
     ram_post_done = false;
-    boot_frames   = 0;
-
 
     // Reset configuration : NMI uniquement, pas d'INT (§4 MAME)
     cpu.IM   = 0;

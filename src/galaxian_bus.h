@@ -107,14 +107,15 @@ public:
     uint8_t read(uint16_t addr) const {
         // ROM linéaire 16 KB — pas de miroir, pas d'interception IM2
         if (addr < 0x4000) return rom[addr];
-        // RAM 1KB avec mirror 0x0400
-        if (addr < 0x5000) return ram[(addr - 0x4000) & 0x03FF];
+        // RAM travail 1 KB : 0x4000-0x47FF, mirroré sur 0x4400 (masque 0x03FF)
+        if (addr < 0x4800) return ram[(addr - 0x4000) & 0x03FF];
+        // 0x4800-0x4FFF : NON CONNECTÉ sur la borne d'origine (§3.1) — bus flottant = 0xFF
+        if (addr < 0x5000) return 0xFF;
         if (addr < 0x5400) return vram[addr & 0x03FF];       // VRAM (1KB, 0x5000-0x53FF)
         // 0x5400-0x57FF : non connecté — retourne 0xFF (§3.1 MAME)
         if (addr < 0x5800) return 0xFF;
-        // OBJRAM — Zone lisible et writable (0x5800-0x5FFF, mirror 0x0700 → 256 octets décodés)
-        // Le CPU lit cette zone pour les collisions, le test RAM et la logique des sprites.
-        if (addr < 0x6000) return spram[addr & 0x00FF];
+        // OBJRAM 256 octets (0x5800-0x58FF) + miroir (0x5900-0x5FFF, MAME mirror(0x0700))
+        if (addr < 0x6000) return spram[(addr - 0x5800) & 0xFF];
         if (addr < 0x6800) return build_in0();       // 0x6000-0x67FF
         if (addr < 0x7000) return build_in1();       // 0x6800-0x6FFF
         if (addr < 0x7800) return build_in2();       // 0x7000-0x77FF
@@ -140,7 +141,7 @@ public:
         // 0x5400-0x57FF : non connecté — ignorer l'écriture (§3.1 MAME)
         if (addr < 0x5800) return;
         // OBJRAM — Écriture mémoire-synchro (0x5800-0x5FFF, mirror 0x0700 → 256 octets)
-        if (addr < 0x6000) { spram[addr & 0x00FF] = val; return; }   // OBJRAM/SPRAM writable
+        if (addr < 0x6000) { spram[(addr - 0x5800) & 0xFF] = val; return; }   // OBJRAM/SPRAM writable
 
         write_hw_reg(addr, val);
     }
