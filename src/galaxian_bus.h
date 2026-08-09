@@ -269,11 +269,11 @@ public:
                 case 0x03:  // 0x6003 = Coin counter (ignoré)
                     break;
                 case 0x04:  // 0x6004 = DAC bit 0 (1MΩ) → VCO fond sonore
-                    audio_synth.write_dac(val); break;
+                    audio_synth.write_dac(0, b0); break;
                 case 0x05:  // 0x6005 = DAC bit 1 (470kΩ) → VCO fond sonore
-                    audio_synth.write_dac(val); break;
+                    audio_synth.write_dac(1, b0); break;
                 case 0x06:  // 0x6006 = DAC bit 2 (220kΩ) → VCO fond sonore
-                    audio_synth.write_dac(val); break;
+                    audio_synth.write_dac(2, b0); break;
                 case 0x07:  // 0x6007 = Start lamps (ignoré)
                     break;
                 default:

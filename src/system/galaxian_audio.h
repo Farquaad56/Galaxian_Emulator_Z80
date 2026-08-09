@@ -77,10 +77,10 @@ public:
     }
 
     // DAC 4-bit → fréquence VCO fond sonore (bourdonnement continu)
-    // Les ports 0x6004-0x6007 écrivent sur les bits du DAC.
-    // On accumule dans m_dac_value puis on calcule la fréquence.
-    void write_dac(uint8_t val) {
-        m_dac_value = (m_dac_value & 0xF0) | (val & 0x0F);
+    // Chaque port 0x6004-0x6007 écrit sur un bit spécifique du DAC agrégé.
+    // bit_pos = 0 pour 6004, 1 pour 6005, 2 pour 6006 (conformément MAME lfo_freq_w).
+    void write_dac(int bit_pos, bool bit_val) {
+        m_dac_value = (m_dac_value & ~(1 << bit_pos)) | (bit_val ? (1 << bit_pos) : 0);
         float dac_norm = static_cast<float>(m_dac_value) / 15.0f; // 0-1
         m_bg_freq = 60.0f + 180.0f * dac_norm;
     }
