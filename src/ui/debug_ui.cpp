@@ -209,9 +209,9 @@ void DebugUI::draw_dipsw_panel(GalaxianBus& bus) {
     if (ImGui::Combo("Cabinet", &cab_sel, cab_str, 2))
         bus.input.dipsw_cabinet = cab_sel ? 1 : 0;
 
-    // ─── TEST Switch (IN0 bit 6) — actif LOW ──────────────────────────────
+    // ─── TEST Switch (IN0 bit 6) — actif HIGH ──────────────────────────────
     ImGui::SeparatorText("TEST / SERVICE");
-    ImGui::Checkbox("TEST (bit 6, actif LOW)", &bus.input.test_switch);
+    ImGui::Checkbox("TEST", &bus.input.test_switch);
     const char* test_label = bus.input.test_switch ? "TEST ACTIVÉ" : "NORMAL";
     ImVec4 test_col = bus.input.test_switch
         ? ImVec4(1.0f, 0.2f, 0.2f, 1.0f)
@@ -220,8 +220,8 @@ void DebugUI::draw_dipsw_panel(GalaxianBus& bus) {
     ImGui::Text("%s", test_label);
     ImGui::PopStyleColor();
 
-    // ─── SERVICE (IN0 bit 7) — actif LOW ────────────────────────────────
-    ImGui::Checkbox("SERVICE (bit 7, actif LOW)", &bus.input.service);
+    // ─── SERVICE (IN0 bit 7) — actif HIGH ────────────────────────────────
+    ImGui::Checkbox("SERVICE", &bus.input.service);
     const char* svc_label = bus.input.service ? "SERVICE ON" : "SERVICE OFF";
     ImVec4 svc_col = bus.input.service
         ? ImVec4(1.0f, 0.7f, 0.0f, 1.0f)

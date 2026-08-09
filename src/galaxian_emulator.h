@@ -48,11 +48,10 @@ public:
     uint8_t  color_prom[0x20]     = {};   // 6l.bpr (32 octets)
     uint32_t palette[32]          = {};   // Palette précalculée ARGB (sprites/tuiles)
     uint32_t star_color[64]       = {};   // 64 couleurs étoiles dédiées (§5.4/§5.5)
-    // Framebuffer interne élargi x3 en largeur pour le LFSR étoiles (768px)
-    // Le LFSR change tous les 1.5 cycles CPU, donc chaque pixel écran correspond
-    // à 3 positions consécutives du LFSR qu'il faut échantillonner séparément.
-    static constexpr int FB_W = 256 * 3;   // 768 pixels internes
-    static constexpr int FB_H = 224;       // hauteur conservée
+    // Framebuffer portrait natif : 224 large × 768 haut (×3 vertical)
+    // Le LFSR étoiles défile sur l'axe vertical, le ×3 s'applique verticalement.
+    static constexpr int FB_W = 224;        // largeur écran portrait
+    static constexpr int FB_H = 256 * 3;    // 768 hauteur (×3 vertical)
     std::vector<uint32_t> framebuffer;     // Image finale (768x224) — heap, pas stack
 
     // Starfield LFSR 17 bits — initialisation à 0 (0x1FFFF bloque le LFSR)
@@ -94,9 +93,6 @@ public:
     // Accès direct pour ImGui (lectures sur &cpu, &bus)
     const uint32_t* get_framebuffer() const { return framebuffer.data(); }
     const uint32_t* get_palette()     const { return palette; }
-
-    // Downsampling framebuffer x3 → écran 256px (nearest-neighbor selon H8)
-    void downsample_to_screen(uint32_t* out, int h_phase) const;
 
 private:
     // Pointeur global nécessaire pour les raw function pointers C du Z80

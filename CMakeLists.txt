@@ -160,6 +160,35 @@ target_include_directories(galaxian_emu PRIVATE
     ${IMGUI_DIR}
 )
 
+# MSVC runtime + Windows SDK headers — CMake/ninja ne source pas vcvars64.bat,
+# donc les chemins par défaut de cl.exe (__INCLUDE_PATH__) sont vides.
+# On les ajoute explicitement à toutes les cibles.
+set(MSVC_INCLUDE "C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.50.35717/include")
+set(WINDOWS_KIT "C:/Program Files (x86)/Windows Kits/10/Include/10.0.26100.0")
+
+# Ajouter les chemins à toutes les bibliothèques et l'exécutable
+target_compile_options(z80_lib           PRIVATE "/I${MSVC_INCLUDE}")
+target_compile_options(galaxian_lib      PRIVATE "/I${MSVC_INCLUDE}")
+target_compile_options(imgui_lib         PRIVATE "/I${MSVC_INCLUDE}")
+target_compile_options(raylib_static     PRIVATE "/I${MSVC_INCLUDE}")
+target_compile_options(debug_ui_lib      PRIVATE "/I${MSVC_INCLUDE}")
+target_compile_options(galaxian_emu      PRIVATE "/I${MSVC_INCLUDE}")
+
+# SDK headers pour toutes les cibles C/C++
+foreach(_tgt z80_lib galaxian_lib imgui_lib raylib_static debug_ui_lib galaxian_emu)
+    target_compile_options(${_tgt} PRIVATE
+        "/I${WINDOWS_KIT}/ucrt"
+        "/I${WINDOWS_KIT}/shared"
+        "/I${WINDOWS_KIT}/um"
+        "/I${WINDOWS_KIT}/winrt"
+    )
+endforeach()
+
+# Chemins LIB pour le linker — nécessaires car CMake/ninja ne source pas vcvars64.bat
+set(MSVC_LIB "C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.50.35717/lib/x64")
+set(WINDOWS_SDK_LIB "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0")
+target_link_options(galaxian_emu PRIVATE "/LIBPATH:${MSVC_LIB}" "/LIBPATH:${WINDOWS_SDK_LIB}/ucrt/x64" "/LIBPATH:${WINDOWS_SDK_LIB}/um/x64")
+
 # ============================================================================
 # Copie automatique des ROMs dans le répertoire de sortie après build
 # ============================================================================

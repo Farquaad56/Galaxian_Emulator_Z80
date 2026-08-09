@@ -8,27 +8,16 @@
 #include "galaxian_emulator.h"
 #include "ui/debug_ui.h"
 
-// Rotation 90° horaire (comme MAME ROT90) : src 768×224 → dst 224×768
-static std::vector<uint32_t> rot_buf;
-
-void blit_rotated(const uint32_t* src, uint32_t* dst) {
-    for (int y = 0; y < 224; y++)
-        for (int x = 0; x < 768; x++)
-            dst[x * 224 + (223 - y)] = src[y * 768 + x];
-}
-
 int main() {
     SetTraceLogLevel(LOG_WARNING);
 
-    // Configuration fenêtre : écran portrait 224×768 pivoté, + panneaux ImGui
-    // FB_W = 768 (sous-pixels), FB_H = 224. Rotation ROT90 → texture 224×768.
+    // Configuration fenêtre : écran portrait 224×768 (pixels carrés), + panneaux ImGui
+    // FB_W = 224, FB_H = 768 — framebuffer déjà en format portrait.
     constexpr int SCALE = 3;
-    constexpr int FB_W = GalaxianEmulator::FB_W;  // 768 sous-pixels
-    constexpr int FB_H = GalaxianEmulator::FB_H;  // 224 lignes
     constexpr int SCREEN_X = 20;
     constexpr int SCREEN_Y = 20;
     constexpr int PANELS_WIDTH = 900;
-    // Affichage : 224×3 × 768 pixels (pixels carrés) + panneau à droite
+    // Affichage : 224×SCALE × 768 pixels (pixels carrés) + panneau à droite
     constexpr int WIN_W = SCREEN_X + 224 * SCALE + PANELS_WIDTH;
     constexpr int WIN_H = SCREEN_Y + 768 + 120;
 
@@ -39,15 +28,14 @@ int main() {
     rlImGuiSetup(true);
 
     // ========================================================================
-    // Audio — Stream float stéréo 44100 Hz
-    // Galaxian tourne à ~60.606 Hz → ~728 échantillons par frame
+    // Audio — désactivé temporairement
     // ========================================================================
     constexpr int AUDIO_SAMPLE_RATE = 44100;
     constexpr int AUDIO_FRAMES = 728;
 
-    InitAudioDevice();
-    AudioStream audio_stream = LoadAudioStream(AUDIO_SAMPLE_RATE, 32, 2);
-    PlayAudioStream(audio_stream);
+    // InitAudioDevice();
+    // AudioStream audio_stream = LoadAudioStream(AUDIO_SAMPLE_RATE, 32, 2);
+    // PlayAudioStream(audio_stream);
 
     // ========================================================================
     // Émulateur Galaxian
@@ -58,8 +46,8 @@ int main() {
     if (!emu.load_roms("assets/roms")) {
         fprintf(stderr, "Erreur : ROMs manquantes.\n");
         fprintf(stderr, "Assurez-vous que les ROMs sont dans ./assets/roms/\n");
-        UnloadAudioStream(audio_stream);
-        CloseAudioDevice();
+        // UnloadAudioStream(audio_stream);
+        // CloseAudioDevice();
         rlImGuiShutdown();
         CloseWindow();
         return 1;
@@ -68,11 +56,9 @@ int main() {
     emu.reset();
 
     // ========================================================================
-    // Texture Raylib pour l'écran émulé — 224×768 (portrait, après rotation ROT90)
-    // Le framebuffer interne est 768×224 ; on le pivot à l'affichage.
+    // Texture Raylib pour l'écran émulé — 224×768 (portrait natif)
+    // Le framebuffer interne est déjà 224×768, plus besoin de rotation.
     // ========================================================================
-    rot_buf.resize(224 * 768);
-
     Image img = GenImageColor(224, 768, BLACK);   // texture portrait 224×768
     Texture2D screen_tex = LoadTextureFromImage(img);
     UnloadImage(img);
@@ -123,8 +109,8 @@ int main() {
         // Contrôles émulateur
         if (IsKeyPressed(KEY_P)) {
             paused = !paused;
-            if (paused) PauseAudioStream(audio_stream);
-            else        ResumeAudioStream(audio_stream);
+            if (paused) /*PauseAudioStream(audio_stream);*/;
+            else        /*ResumeAudioStream(audio_stream);*/;
         }
         if (IsKeyPressed(KEY_R)) emu.reset();
 
@@ -142,17 +128,16 @@ int main() {
             emu.run_frame();
 
             // Ne mettre à jour l'audio que si le buffer a été consommé
-            if (IsAudioStreamProcessed(audio_stream)) {
-                emu.bus.render_audio(audio_buffer, AUDIO_FRAMES);
-                UpdateAudioStream(audio_stream, audio_buffer, AUDIO_FRAMES);
-            }
+            // if (IsAudioStreamProcessed(audio_stream)) {
+            //     emu.bus.render_audio(audio_buffer, AUDIO_FRAMES);
+            //     UpdateAudioStream(audio_stream, audio_buffer, AUDIO_FRAMES);
+            // }
         }
 
         // --------------------------------------------------------------------
-        // Mise à jour de la texture Raylib — rotation ROT90 (768×224 → 224×768)
+        // Mise à jour de la texture Raylib — framebuffer portrait direct (224×768)
         // --------------------------------------------------------------------
-        blit_rotated(emu.get_framebuffer(), rot_buf.data());
-        UpdateTexture(screen_tex, rot_buf.data());
+        UpdateTexture(screen_tex, emu.get_framebuffer());
 
         // --------------------------------------------------------------------
         // Rendu
@@ -160,7 +145,7 @@ int main() {
         BeginDrawing();
         ClearBackground(BLACK);
 
-        // Écran émulé — rotation 90° : texture 224×768 → stretch horizontal ×3
+        // Écran émulé — portrait natif : texture 224×768 → scale ×3 vertical
         Rectangle src = { 0.0f, 0.0f, (float)224, (float)768 };
         Rectangle dst = { (float)SCREEN_X, (float)SCREEN_Y,
                           (float)224 * SCALE, (float)768 };
@@ -188,8 +173,8 @@ int main() {
     // ========================================================================
     // Nettoyage
     // ========================================================================
-    UnloadAudioStream(audio_stream);
-    CloseAudioDevice();
+    // UnloadAudioStream(audio_stream);
+    // CloseAudioDevice();
     UnloadTexture(screen_tex);
     rlImGuiShutdown();
     CloseWindow();
