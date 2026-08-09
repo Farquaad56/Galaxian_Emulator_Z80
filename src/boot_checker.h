@@ -14,6 +14,7 @@ struct BootChecker {
     int  frame  = 0;
     int  resets = 0;
     bool verdict = false;        // true = verdict rendu, plus rien n'est affiché
+    bool boot_finished = false;  // true quand le boot a terminé normalement (attract reached)
 
     static const char* name(int id) {
         switch (id) {
@@ -34,6 +35,7 @@ struct BootChecker {
         printf("[BOOT %d/%d] OK  %s  (frame %d)\n", id, NB, name(id), frame);
         if (id == NB) {
             verdict = true;
+            boot_finished = true;
             printf("[BOOT] ==== BOOT COMPLETE — attract mode atteint ====\n");
         }
     }

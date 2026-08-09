@@ -52,8 +52,9 @@ void     GalaxianEmulator::cb_mem_write(uint16_t addr, uint8_t val) {
             if      (addr >= 0x5000 && addr < 0x5800) bc.mark(2);                    // VRAM
             else if (addr >= 0x5800 && addr < 0x6000) bc.mark(3);                    // OBJRAM
             if ((addr & 0x7800) == 0x7000) {
-                if ((addr & 0x07FF) == 0x0001 && (val & 1)) bc.mark(6);              // NMI ON
-                if ((addr & 0x07FF) == 0x0004 && (val & 1)) bc.mark(8);              // STARS ON
+                if ((addr & 0x07FF) == 0x0001 && (val & 1)) bc.mark(6);              // NMI ON (mirror IO)
+                if ((addr & 0x07) == 0x01 && (val & 1))      bc.mark(5);              // NMI ON écriture 7001 bit0=1
+                if ((addr & 0x07) == 0x04 && (val & 1))      bc.mark(7);              // STARS ON (index 7, pas 8)
             }
         }
     }
@@ -399,8 +400,8 @@ void GalaxianEmulator::reset() {
         uint8_t in0 = bus.build_in0();
         LOG_INFO("[PORTS-IN] IN0=%02X IN1=%02X IN2=%02X | TEST=%s SERVICE=%s\n",
             in0, bus.build_in1(), bus.build_in2(),
-            (in0 & 0x40) ? "RELACHE (normal)" : "ENFONCE(!!!)",
-            (in0 & 0x80) ? "RELACHE (normal)" : "PRESSE(!!!)");
+            (in0 & 0x40) ? "ENFONCE" : "relache",
+            (in0 & 0x80) ? "PRESSE"  : "relache");
     }
 
     bus.video_cnt.reset_frame();
@@ -714,8 +715,8 @@ void GalaxianEmulator::run_frame() {
 
     boot_chk.tick_frame();               // ??? timeout global 30 frames
 
-    // Dump du ring buffer au premier verdict (boucle bloquante diagnostiqu??e)
-    if (boot_chk.verdict && !boot_dump_done) {
+    // Dump du ring buffer uniquement en cas d'???chec boot (pas quand attract tourne normalement)
+    if (boot_chk.verdict && !boot_chk.boot_finished && !boot_dump_done) {
         boot_dump_done = true;
         printf("[BOOT] ETAT AU BLOCAGE : PC=%04X SP=%04X AF=%04X BC=%04X DE=%04X HL=%04X I=%02X IM=%d\n",
                cpu.PC, cpu.SP, cpu.AF, cpu.BC, cpu.DE, cpu.HL, cpu.I, cpu.IM);
