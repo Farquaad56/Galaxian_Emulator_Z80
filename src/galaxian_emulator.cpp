@@ -787,10 +787,10 @@ void GalaxianEmulator::render_frame() {
 }
 
 // ============================================================================
-// render_stars ??? LFSR 17 bits : x^17 + x^14 + 1 (code MAME galaxian_v.cpp)
+// render_stars — LFSR 17 bits : x^17 + x^14 + 1 (code MAME galaxian_v.cpp)
 // P??riode : 2^17 - 1 = 131071 clocks par frame.
-// Framebuffer portrait : FB_W=224, FB_H=768 (=256*3).
-// Le LFSR d??file le long de l'axe VERTICAL (H brut = axe vertical physique).
+// Framebuffer paysage : FB_W=768 (×3 horizontal), FB_H=256.
+// Le LFSR d??file le long de l'axe HORIZONTAL ; le ×3 reste horizontal.
 // Damier (§5.5 MAME) : ??toiles affich??es quand (V1 XOR H8)==1 avec V1=bit1 de x,
 //   H8=bit8 de y/3 (position verticale en pixels ?cran).
 // ============================================================================
@@ -817,12 +817,11 @@ void GalaxianEmulator::render_stars() {
                     if (color < 64 && p + (two ? 2 : 1) <= FB_H) {
                         uint32_t c = star_color[color];
                         for (int k = 0; k < (two ? 2 : 1); k++)
-                            framebuffer[(p + k) * FB_W + x] = c;
+                            framebuffer[p * FB_W + x] = c;   // ×1 sur Y, pas de ×3 vertical
                     }
                 }
             }
 
-            // Avancer la position verticale : alternance 1 puis 2 sous-pixels par clock
             p += two ? 2 : 1;
             two = !two;
         }
@@ -831,15 +830,14 @@ void GalaxianEmulator::render_stars() {
 }
 
 // ============================================================================
-// render_tilemap ??? VRAM organis??e en COLONNES d'abord : addr = col*32+row
-// Framebuffer portrait : FB_W=224 (horizontal), FB_H=768 (=256*3, vertical).
-// Transposition des axes : row→X (physique horizontal), col→Y (physique vertical).
-// Flip screen : VFLIP(7007) → inversion axe X physique ; HFLIP(7006) → inversion axe Y physique.
+// render_tilemap — VRAM organis??e en COLONNES d'abord : addr = col*32+row
+// Framebuffer paysage : FB_W=768 (×3 horizontal), FB_H=256.
+// Alignement sprites : sx = row*8+px (horizontal), sy = col*8+py-scroll_y (vertical).
+// ×3 sur l'axe HORIZONTAL (pas vertical) pour les sous-pixels de tuile.
 // ============================================================================
 void GalaxianEmulator::render_tilemap() {
-    bool flip_x = bus.regs.flip_screen_x;  // HFLIP → inversion axe Y physique
-    bool flip_y = bus.regs.flip_screen_y;  // VFLIP → inversion axe X physique
-    int  screen_h = FB_H / 3;              // 256 lignes écran
+    bool fH = bus.regs.flip_screen_x;   // HFLIP → miroir axe brut X (rx)
+    bool fV = bus.regs.flip_screen_y;   // VFLIP → miroir axe brut Y (ry)
 
     for (int col = 0; col < 32; col++) {
         int scroll_y = bus.spram[col * 2];
@@ -854,21 +852,20 @@ void GalaxianEmulator::render_tilemap() {
                     uint8_t pix = decode_pixel(tile_num, px, py);
                     if (pix == 0) continue;
 
-                    // Transposition : row→X, col→Y
-                    int x = row * 8 + px;                     // physique horizontal
-                    int y = (col * 8 + py - scroll_y + 256) & 0xFF;  // physique vertical
+                    // Transposition MAME : colonnes VRAM → axe V brut (ry), lignes+scroll → axe H brut (rx)
+                    int rx = (row * 8 + py - scroll_y + 256) & 0xFF;  // axe H brut (scroll ici)
+                    int ry = col * 8 + px;                           // axe V brut
 
-                    if (x >= FB_W) continue;
-                    if (y >= screen_h) continue;
+                    if (fH) rx = 255 - rx;
+                    if (fV) ry = FB_H - 1 - ry;
 
-                    // Flips sur les coordonn??es physiques
-                    if (flip_y) x = FB_W - 1 - x;             // VFLIP → flip axe X
-                    if (flip_x) y = screen_h - 1 - y;          // HFLIP → flip axe Y
+                    if (ry >= FB_H) continue;   // visible V = 224
 
-                    int y3 = y * 3;                            // ×3 sur la verticale
-                    framebuffer[y3 * FB_W + x] =
-                    framebuffer[(y3 + 1) * FB_W + x] =
-                    framebuffer[(y3 + 2) * FB_W + x] = palette[color * 4 + pix];
+                    // ×3 sur l'axe H brut pour sous-pixels de tuile
+                    int x3 = rx * 3;
+                    framebuffer[ry * FB_W + x3] =
+                    framebuffer[ry * FB_W + x3 + 1] =
+                    framebuffer[ry * FB_W + x3 + 2] = palette[color * 4 + pix];
                 }
             }
         }
@@ -876,22 +873,20 @@ void GalaxianEmulator::render_tilemap() {
 }
 
 // ============================================================================
-// render_sprites ??? 8 sprites 16??16 pixels, OBJRAM ?? 0x5840
-// Framebuffer portrait : FB_W=224 (horizontal), FB_H=768 (=256*3, vertical).
-// Transposition : raw_x→X physique horizontal, raw_y→Y physique vertical.
-// Clip hardware 17px (§5.2 MAME) s'applique sur l'axe vertical (H brut = axe Y).
+// render_sprites — 8 sprites 16??16 pixels, OBJRAM ?? 0x5840
+// Framebuffer paysage : FB_W=768 (×3 horizontal), FB_H=256.
+// ×3 sur l'axe HORIZONTAL pour les sous-pixels de tuile.
 // ============================================================================
 void GalaxianEmulator::render_sprites() {
-    bool gflip_x = bus.regs.flip_screen_x;  // HFLIP → inversion axe Y physique
-    bool gflip_y = bus.regs.flip_screen_y;  // VFLIP → inversion axe X physique
-    int  screen_h = FB_H / 3;               // 256 lignes écran
+    bool gflip_x = bus.regs.flip_screen_x;  // HFLIP → miroir axe V brut (fy) en portrait
+    bool gflip_y = bus.regs.flip_screen_y;  // VFLIP → miroir axe H brut (fx) en portrait
 
     // Rendu de 7 ?? 0 (sprite 0 a la priorit?? haute)
     for (int i = 7; i >= 0; i--) {
         const uint8_t* s = &bus.spram[0x40 + i * 4];
 
-        int sy_raw = static_cast<int>(s[0]);
-        int sx     = static_cast<int>(s[3]) + 1;
+        int sy_raw = static_cast<int>(s[0]);   // raw Y → axe H brut (vertical physique)
+        int sx     = static_cast<int>(s[3]) + 1; // raw X → axe V brut (horizontal physique)
 
         // Tile index (6 bits, bits 5:0 du byte 1)
         uint8_t tile_idx = s[1] & 0x3F;
@@ -899,52 +894,54 @@ void GalaxianEmulator::render_sprites() {
         // Attributs (byte 2) : couleur + flip flags individuels du sprite
         uint8_t attr     = s[2];
         int color        = attr & 0x07;          // bits 2:0
-        bool sflipX      = (attr & 0x01) != 0;   // bit 0 ??? flip X individuel
-        bool sflipY      = (attr & 0x02) != 0;   // bit 1 ??? flip Y individuel
+        bool sflipX      = (attr & 0x01) != 0;   // bit 0 → flip axe H brut (draw_py) en portrait
+        bool sflipY      = (attr & 0x02) != 0;   // bit 1 → flip axe V brut (draw_px) en portrait
 
         // Sprite 16??16 = 4 tuiles de 8??8 arrang??es en 2??2
+        // En portrait : axe H brut (rx, vertical physique) porte py/oy,
+        //               axe V brut (ry, horizontal physique) porte px/ox.
         int base_tile = tile_idx * 4;
-        static const int QOX[4] = {0, 8, 0, 8};
-        static const int QOY[4] = {0, 0, 8, 8};
+        static const int QOX[4] = {0, 0, 8, 8};   // offsets sur l'axe V brut (ry) — px direction
+        static const int QOY[4] = {0, 8, 0, 8};   // offsets sur l'axe H brut (rx) — py direction
 
         for (int q = 0; q < 4; q++) {
             uint8_t tile_num = static_cast<uint8_t>(base_tile + q);
-            int ox = QOX[q];
-            int oy = QOY[q];
+            int oy = QOY[q];   // offset sur l'axe H brut (rx)
+            int ox = QOX[q];   // offset sur l'axe V brut (ry)
 
             for (int py = 0; py < 8; py++) {
                 for (int px = 0; px < 8; px++) {
                     uint8_t pix = decode_pixel(tile_num, px, py);
                     if (pix == 0) continue;
 
-                    // Flip individuel du sprite
-                    int draw_px = sflipX ? (7 - px) : px;
-                    int draw_py = sflipY ? (7 - py) : py;
+                    // Flip individuel du sprite — axes transpos??s en portrait :
+                    // draw_py (py) → axe H brut (rx), draw_px (px) → axe V brut (ry)
+                    int draw_py = sflipX ? (7 - py) : py;   // flip sur axe H brut
+                    int draw_px = sflipY ? (7 - px) : px;   // flip sur axe V brut
 
-                    // Transposition des axes
-                    int x = sx + ox + draw_px;                           // physique horizontal
-                    int y = 255 - sy_raw + oy + draw_py;                  // physique vertical (raw_y invers?? CRT)
+                    // Position brute : axe H brut (rx, ×3), axe V brut (ry)
+                    int rx = sy_raw + oy + draw_py;         // axe H brut (vertical physique)
+                    int ry = sx + ox + draw_px;             // axe V brut (horizontal physique)
 
-                    if (x < 0 || x >= FB_W) continue;
-                    if (y < 0 || y >= screen_h) continue;
+                    if (gflip_x) rx = 255 - rx;            // HFLIP → miroir axe H brut
+                    if (gflip_y) ry = FB_H - 1 - ry;       // VFLIP → miroir axe V brut
 
-                    // Clipping hardware 17px sur l'axe vertical (§5.2 MAME)
-                    if (gflip_x) {
-                        int clip_min = gflip_x ? (screen_h - 1 - 255) : 17;
-                        int clip_max = gflip_x ? (screen_h - 1 - 17)  : 255;
-                        if (y < clip_min || y > clip_max) continue;
+                    int fx = rx * 3;                        // axe H brut en sous-pixels
+                    int fy = ry;                            // axe V brut
+
+                    if (fx < 0 || fx >= FB_W) continue;
+                    if (fy < 0 || fy >= FB_H) continue;
+
+                    // Clipping hardware 17px sur l'axe H brut (§5.2 MAME)
+                    if (!gflip_x) {
+                        if (fx < 17 * 3) continue;          // clip.min_x = (16+1)*3
                     } else {
-                        if (y < 17 || y > 255) continue;
+                        if (fx > (256 - 17) * 3 - 1) continue; // clip.max_x
                     }
 
-                    // Flips globaux sur les coordonn??es physiques
-                    if (gflip_y) x = FB_W - 1 - x;    // VFLIP → flip axe X
-                    if (gflip_x) y = screen_h - 1 - y; // HFLIP → flip axe Y
-
-                    int y3 = y * 3;                            // ×3 sur la verticale
-                    framebuffer[y3 * FB_W + x] =
-                    framebuffer[(y3 + 1) * FB_W + x] =
-                    framebuffer[(y3 + 2) * FB_W + x] = palette[color * 4 + pix];
+                    framebuffer[fy * FB_W + fx] =
+                    framebuffer[fy * FB_W + fx + 1] =
+                    framebuffer[fy * FB_W + fx + 2] = palette[color * 4 + pix];
                 }
             }
         }
@@ -952,68 +949,59 @@ void GalaxianEmulator::render_sprites() {
 }
 
 // ============================================================================
-// render_bullets ??? Shells (spram[0x60-0x7C]) et Missile (spram[0x80])
-// Framebuffer portrait : FB_W=224 (horizontal), FB_H=768 (=256*3, vertical).
-// Transposition des axes : raw_x→X physique horizontal, raw_y→Y physique vertical.
-// Clipping hardware 17px (§5.2 MAME) s'applique sur l'axe vertical (H brut).
+// render_bullets — Shells (spram[0x60-0x7C]) et Missile (spram[0x80])
+// Framebuffer paysage : FB_W=768 (×3 horizontal), FB_H=256.
+// ×3 sur l'axe HORIZONTAL pour les sous-pixels de tuile.
 // ============================================================================
 void GalaxianEmulator::render_bullets() {
-    int screen_h = FB_H / 3;              // 256 lignes écran
+    // Clipping hardware sur l'axe H brut ×3 (§5.2 MAME) : [17*3, (256-17)*3 - 1]
+    int xmin_b = bus.regs.flip_screen_x ? ((256 - 17) * 3 - 1) : 17 * 3;
+    int xmax_b = bus.regs.flip_screen_x ? (FB_W - 1 - 17 * 3) : (256 - 17) * 3 - 1;
 
-    // Clipping hardware sur l'axe vertical (H brut = axe Y) : [17, 255]
-    int ymin_b = bus.regs.flip_screen_x ? (screen_h - 1 - 255) : 17;
-    int ymax_b = bus.regs.flip_screen_x ? (screen_h - 1 - 17)  : 255;
-
-    // Shells ??? OBJRAM base 0x60, entr??es 0 ?? 6
+    // Shells — OBJRAM base 0x60, entr??es 0 ?? 6
     for (int i = 0; i < 7; i++) {
         int base = 0x60 + i * 4;
         uint8_t sy_raw = bus.spram[base + 0];
-        int y = 255 - static_cast<int>(sy_raw);   // physique vertical (raw_y invers?? CRT)
+        int fy = 255 - static_cast<int>(sy_raw);   // axe V brut (raw_y invers?? CRT)
 
-        if (y < ymin_b || y > ymax_b) continue;
-        if (y < 0 || y >= screen_h) continue;
+        if (fy < 0 || fy >= FB_H) continue;
 
         // ??5.3 : x -= 4 pour alignement line buffer
-        int sx = static_cast<int>(bus.spram[base + 3]) - 4;
-        int x = sx;                              // physique horizontal
+        int fx_base = (static_cast<int>(bus.spram[base + 3]) - 4) * 3;   // axe H brut ×3
+        if (fx_base < xmin_b || fx_base > xmax_b) continue;
 
-        if (x < 0 || x >= FB_W) continue;
-
-        // Shell = ligne horizontale blanche pure (§5.4)
+        // Shell = ligne horizontale blanche pure (§5.4) — ×3 sur axe H brut
         uint32_t white = 0xFFFFFFFF;
-        int y3 = y * 3;                          // ×3 sur la verticale
         for (int dx = 0; dx < 12; dx++) {
-            int fx = x + dx;
+            int fx = fx_base + dx * 3;
+            if (fx < xmin_b || fx > xmax_b) continue;
             if (fx < 0 || fx >= FB_W) continue;
-            framebuffer[y3 * FB_W + fx] =
-            framebuffer[(y3 + 1) * FB_W + fx] =
-            framebuffer[(y3 + 2) * FB_W + fx] = white;
+            framebuffer[fy * FB_W + fx] =
+            framebuffer[fy * FB_W + fx + 1] =
+            framebuffer[fy * FB_W + fx + 2] = white;
         }
     }
 
-    // Missile ??? OBJRAM base 0x60, entr??e 7 (spram[0x80])
+    // Missile — OBJRAM base 0x60, entr??e 7 (spram[0x80])
     {
         int base = 0x60 + 0x20;
         uint8_t sy_raw = bus.spram[base + 0];
-        int y = 255 - static_cast<int>(sy_raw);
+        int fy = 255 - static_cast<int>(sy_raw);
 
-        if (y < ymin_b || y > ymax_b) return;
-        if (y < 0 || y >= screen_h) return;
+        if (fy < 0 || fy >= FB_H) return;
 
-        int sx = static_cast<int>(bus.spram[base + 3]) - 4;
-        int x = sx;
+        int fx_base = (static_cast<int>(bus.spram[base + 3]) - 4) * 3;   // axe H brut ×3
+        if (fx_base < xmin_b || fx_base > xmax_b) return;
 
-        if (x < 0 || x >= FB_W) return;
-
-        // Missile = jaune pur (§5.4 MAME)
+        // Missile = jaune pur (§5.4 MAME) — ×3 sur axe H brut
         uint32_t yellow = (0xFFu << 24) | (0xFFu << 16) | (0xFFu << 8) | 0x00u;
-        int y3 = y * 3;
         for (int dx = 0; dx < 12; dx++) {
-            int fx = x + dx;
+            int fx = fx_base + dx * 3;
+            if (fx < xmin_b || fx > xmax_b) continue;
             if (fx < 0 || fx >= FB_W) continue;
-            framebuffer[y3 * FB_W + fx] =
-            framebuffer[(y3 + 1) * FB_W + fx] =
-            framebuffer[(y3 + 2) * FB_W + fx] = yellow;
+            framebuffer[fy * FB_W + fx] =
+            framebuffer[fy * FB_W + fx + 1] =
+            framebuffer[fy * FB_W + fx + 2] = yellow;
         }
     }
 }

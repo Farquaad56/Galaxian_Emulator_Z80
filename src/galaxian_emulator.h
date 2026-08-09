@@ -48,10 +48,12 @@ public:
     uint8_t  color_prom[0x20]     = {};   // 6l.bpr (32 octets)
     uint32_t palette[32]          = {};   // Palette précalculée ARGB (sprites/tuiles)
     uint32_t star_color[64]       = {};   // 64 couleurs étoiles dédiées (§5.4/§5.5)
-    // Framebuffer portrait natif : 224 large × 768 haut (×3 vertical)
-    // Le LFSR étoiles défile sur l'axe vertical, le ×3 s'applique verticalement.
-    static constexpr int FB_W = 224;        // largeur écran portrait
-    static constexpr int FB_H = 256 * 3;    // 768 hauteur (×3 vertical)
+    // Framebuffer brut MAME : 768 large (×3 horizontal) × 224 haut (zone visible uniquement)
+    // Axe X brut (0..767, ×3) → vertical à l'écran après ROT90
+    // Axe Y brut (0..223)     → horizontal à l'écran après ROT90
+    static constexpr int FB_W = 256 * 3;    // 768 (sous-pixels horizontaux, axe H brut)
+    static constexpr int FB_H = 224;        // 224 lignes visibles (axe V brut)
+    static constexpr int PORT_W = 224;      // largeur écran portrait après ROT90 (= axe V brut)
     std::vector<uint32_t> framebuffer;     // Image finale (768x224) — heap, pas stack
 
     // Starfield LFSR 17 bits — initialisation à 0 (0x1FFFF bloque le LFSR)
