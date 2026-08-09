@@ -11,10 +11,11 @@
 int main() {
     SetTraceLogLevel(LOG_WARNING);
 
-    // Configuration fenêtre : écran émulé 256×3 px + panneaux ImGui (décalé pour éviter chevauchement)
+    // Configuration fenêtre : écran émulé 768×3 px + panneaux ImGui (décalé pour éviter chevauchement)
+    // FB_W = 256*3 = 768 (sous-pixels), FB_H = 224. SCALE=3 donne 768×672 pixels écran.
     constexpr int SCALE = 3;
-    constexpr int EMU_W = 256;
-    constexpr int EMU_H = 224;
+    constexpr int EMU_W = GalaxianEmulator::FB_W; // 768 sous-pixels
+    constexpr int EMU_H = GalaxianEmulator::FB_H; // 224 lignes
     constexpr int SCREEN_X = 280;
     constexpr int SCREEN_Y = 20;
     constexpr int PANELS_WIDTH = 900;
@@ -57,7 +58,7 @@ int main() {
     emu.reset();
 
     // ========================================================================
-    // Texture Raylib pour l'écran émulé
+    // Texture Raylib pour l'écran émulé — 768×224 (framebuffer ×3 direct)
     // ========================================================================
     Image img = GenImageColor(EMU_W, EMU_H, BLACK);
     Texture2D screen_tex = LoadTextureFromImage(img);
@@ -74,8 +75,6 @@ int main() {
 
     bool paused = false;
     float audio_buffer[AUDIO_FRAMES * 2]; // Stéréo interleaved (float 32-bit)
-    // Tampon intermédiaire pour le downsampling du framebuffer x3 → écran 256px
-    uint32_t screen_buffer[EMU_W * EMU_H] = {};
 
     // ========================================================================
     // Boucle principale
@@ -129,13 +128,6 @@ int main() {
         if (!paused) {
             emu.run_frame();
 
-            // Downsampling : framebuffer interne 768x224 → écran 256x224
-            // Le LFSR étoiles utilise un facteur x3 ; on choisit la phase H courante
-            // pour préserver l'aliasing CRT au lieu de lisser les pixels.
-            static int h_phase_counter = 0;
-            emu.downsample_to_screen(screen_buffer, h_phase_counter % 3);
-            h_phase_counter++;
-
             // Ne mettre à jour l'audio que si le buffer a été consommé
             if (IsAudioStreamProcessed(audio_stream)) {
                 emu.bus.render_audio(audio_buffer, AUDIO_FRAMES);
@@ -144,9 +136,9 @@ int main() {
         }
 
         // --------------------------------------------------------------------
-        // Mise à jour de la texture Raylib avec le framebuffer downsamplé (256x224)
+        // Mise à jour de la texture Raylib avec le framebuffer ×3 direct (768x224)
         // --------------------------------------------------------------------
-        UpdateTexture(screen_tex, screen_buffer);
+        UpdateTexture(screen_tex, emu.get_framebuffer());
 
         // --------------------------------------------------------------------
         // Rendu
@@ -154,8 +146,11 @@ int main() {
         BeginDrawing();
         ClearBackground(BLACK);
 
-        // Écran émulé (décalé pour éviter chevauchement avec panels ImGui)
-        DrawTextureEx(screen_tex, {(float)SCREEN_X, (float)SCREEN_Y}, 0.0f, (float)SCALE, WHITE);
+        // Écran émulé — DrawTexturePro pour aspect CRT ×3 vertical (768×672)
+        Rectangle src = { 0.0f, 0.0f, (float)EMU_W, (float)EMU_H };
+        Rectangle dst = { (float)SCREEN_X, (float)SCREEN_Y, (float)EMU_W * SCALE / SCALE, (float)EMU_H * SCALE };
+        // Équivalent : src=768×224 → dst=768×672 (= ×3 vertical pour aspect CRT)
+        DrawTexturePro(screen_tex, src, dst, {0.0f, 0.0f}, 0.0f, WHITE);
 
         // Label PAUSE
         if (paused) {

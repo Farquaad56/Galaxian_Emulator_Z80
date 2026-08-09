@@ -783,48 +783,49 @@ void GalaxianEmulator::render_frame() {
     render_tilemap();   // Fond de jeu
     render_bullets();   // Tirs (Shells + Missile) — par-dessus le fond
     render_sprites();   // Objets mobiles (par-dessus)
+
 }
 
 // ============================================================================
 // render_stars — LFSR 17 bits : x^17 + x^14 + 1 (code MAME galaxian_v.cpp)
-// Période : 2^17 - 1 = 131071 clocks par frame (512×256 = 131072 → 1 décalage)
-// Masque de damier (§5.5 MAME) : les étoiles ne s'affichent que si (V1 XOR H8) == 1,
-//   où V1 = bit 1 du compteur V (ligne courante) et H8 = bit 8 du compteur H.
-//   Cela crée un motif en damier typique des CRT de l'époque.
-// Framebuffer élargi x3 : chaque pixel écran correspond à 3 positions LFSR consécutives.
+// Période : 2^17 - 1 = 131071 clocks par frame.
+// Le framebuffer a FB_W = 768 pixels de large (×3 de 256).
+// On parcourt les 768 colonnes du framebuffer avec un motif asymétrique :
+//   alternance 1 puis 2 sous-pixels → 3 positions LFSR pour 2 clocks, soit duty 2/3.
+// Masque de damier (§5.5 MAME) : étoiles affichées uniquement quand (V1 XOR H8)==1
+//   et clock < 256 (zone visible, H8=0).
 // ============================================================================
 void GalaxianEmulator::render_stars() {
     if (!bus.regs.star_enable) return;
 
     uint32_t shiftreg = star_lfsr;
 
-    // Clock le LFSR pour toute la frame — MAME §5.5 : période = 2^17 - 1 = 131071 clocks
-    // Le framebuffer a FB_W = 768 pixels de large (x3 de 256).
-    // clock / 512 donne la ligne Y, clock % 512 donne la colonne LFSR sur 512 positions.
-    // Chaque pixel écran utilise 3 positions consécutives : x_pixel = (clock % 512) / 3.
-    for (int clock = 0; clock < (1 << 17) - 1; clock++) {
-        // Feedback LFSR selon MAME
-        uint32_t feedback = ((shiftreg >> 12) ^ ~shiftreg) & 1;
-        shiftreg = (shiftreg >> 1) | (feedback << 16);
-
-        int y       = clock / 512;
-        int x_lfsr  = clock % 512;            // position dans la période LFSR (0-511)
-        int h_phase = x_lfsr % 3;             // phase interne 0/1/2 pour le sous-échantillonnage
-
-        if (y >= FB_H || x_lfsr >= FB_W) continue;
-
-        // Masque de damier (§5.5 MAME) : V1 = bit 1 de y, H8 = bit 8 de x_lfsr
-        // L'étoile n'apparaît que si (V1 XOR H8) == 1
+    for (int y = 0; y < FB_H; y++) {
         int v1 = (y >> 1) & 1;
-        int h8 = (x_lfsr >> 8) & 1;
-        if ((v1 ^ h8) != 1) continue;
+        bool two = false;   // alternance : 1 sous-pixel puis 2, pour duty cycle 2/3
+        int p = 0;          // position courante dans le framebuffer (0..FB_W-1)
 
-        // Condition d'affichage étoile : bits supérieurs = 1, bit 0 = 0
-        if ((shiftreg & 0x1FE01) == 0x1FE00) {
-            int color = (~shiftreg & 0x1F8) >> 3;
-            if (color < 16) {
-                framebuffer[y * FB_W + x_lfsr] = palette[16 + color];
+        for (int clock = 0; clock < 512; clock++) {
+            // Feedback LFSR selon MAME
+            uint32_t feedback = ((shiftreg >> 12) ^ ~shiftreg) & 1;
+            shiftreg = (shiftreg >> 1) | (feedback << 16);
+
+            // Zone visible uniquement : H8=0 pour clock < 256
+            if (clock < 256 && v1 == 1) {
+                // Masque de damier : condition d'affichage étoile
+                if ((shiftreg & 0x1FE01) == 0x1FE00) {
+                    int color = (~shiftreg & 0x1F8) >> 3;
+                    if (color < 16 && p + (two ? 2 : 1) <= FB_W) {
+                        uint32_t c = palette[16 + color];
+                        for (int k = 0; k < (two ? 2 : 1); k++)
+                            framebuffer[y * FB_W + p + k] = c;
+                    }
+                }
             }
+
+            // Avancer la position : alternance 1 puis 2 sous-pixels par clock LFSR
+            p += two ? 2 : 1;
+            two = !two;
         }
     }
     star_lfsr = shiftreg;
@@ -880,7 +881,9 @@ void GalaxianEmulator::render_tilemap() {
                     if (flip_x) sx = 255 - sx;
                     if (flip_y) sy = 223 - sy;
 
-                    framebuffer[sy * FB_W + sx] = palette[color * 4 + pix];
+                    // Écrire en ×3 sous-pixels pour remplir le framebuffer 768px
+                    int sx3 = sx * 3;
+                    framebuffer[sy * FB_W + sx3] = framebuffer[sy * FB_W + sx3 + 1] = framebuffer[sy * FB_W + sx3 + 2] = palette[color * 4 + pix];
                 }
             }
         }
@@ -948,7 +951,9 @@ void GalaxianEmulator::render_sprites() {
 
                     if (fx < 0 || fx >= 256 || fy < 0 || fy >= 224) continue;
 
-                    framebuffer[fy * FB_W + fx] = palette[color * 4 + pix];
+                    // Écrire en ×3 sous-pixels pour remplir le framebuffer 768px
+                    int fx3 = fx * 3;
+                    framebuffer[fy * FB_W + fx3] = framebuffer[fy * FB_W + fx3 + 1] = framebuffer[fy * FB_W + fx3 + 2] = palette[color * 4 + pix];
                 }
             }
         }
@@ -974,11 +979,12 @@ void GalaxianEmulator::render_bullets() {
         int screen_y = 255 - sy_raw;
         if (screen_y < 0 || screen_y >= 224) continue;
 
-        // Shell = ligne horizontale blanche de 4 pixels
-        for (int dx = 0; dx < 4; dx++) {
-            int fx = sx + dx;
-            if (fx >= 256) continue;
-            framebuffer[screen_y * FB_W + fx] = palette[1]; // Blanc (palette[1])
+        // Shell = ligne horizontale blanche de 4px × 3 sous-pixels = 12 colonnes
+        int sx3 = sx * 3;
+        for (int dx = 0; dx < 12; dx++) {
+            int fx3 = sx3 + dx;
+            if (fx3 >= FB_W) continue;
+            framebuffer[screen_y * FB_W + fx3] = palette[1]; // Blanc
         }
     }
 
@@ -993,11 +999,12 @@ void GalaxianEmulator::render_bullets() {
         int screen_y = 255 - sy_raw;
         if (screen_y < 0 || screen_y >= 224) return;
 
-        // Missile = ligne horizontale jaune de 4 pixels
-        for (int dx = 0; dx < 4; dx++) {
-            int fx = sx + dx;
-            if (fx >= 256) continue;
-            framebuffer[screen_y * FB_W + fx] = palette[9]; // Jaune (palette[9])
+        // Missile = ligne horizontale jaune de 4px × 3 sous-pixels = 12 colonnes
+        int sx3 = sx * 3;
+        for (int dx = 0; dx < 12; dx++) {
+            int fx3 = sx3 + dx;
+            if (fx3 >= FB_W) continue;
+            framebuffer[screen_y * FB_W + fx3] = palette[9]; // Jaune
         }
     }
 }
