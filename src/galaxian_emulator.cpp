@@ -513,14 +513,13 @@ void GalaxianEmulator::build_palette() {
 
 // ============================================================================
 // D??codage pixel de tuile ??? 2 plans de bits, 16 octets/tuile
-// Plan 0 (bit LSB) : octets [0-7]
-// Plan 1 (bit MSB) : octets [8-15]
+// Hardware : 1h.bin = plan 0 (@0x000), 1k.bin = plan 1 (@0x800)
+// 8 octets par tuile par plan (1 octet/ligne)
 // ============================================================================
 uint8_t GalaxianEmulator::decode_pixel(uint8_t tile_num, int px, int py) const {
-    int base   = tile_num * 16;
-    int bit    = 7 - px;                        // pixel 0 = bit MSB (gauche)
-    uint8_t p0 = (gfx_rom[base     + py] >> bit) & 1;
-    uint8_t p1 = (gfx_rom[base + 8 + py] >> bit) & 1;
+    const int addr = (tile_num & 0xFF) * 8 + py;
+    const uint8_t p0 = (gfx_rom[addr]         >> (7 - px)) & 1;
+    const uint8_t p1 = (gfx_rom[addr + 0x800] >> (7 - px)) & 1;
     return (p1 << 1) | p0;                      // valeur 0???3
 }
 
