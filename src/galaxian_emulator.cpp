@@ -52,10 +52,6 @@ uint8_t  GalaxianEmulator::cb_mem_read (uint16_t addr) {
     return val;
 }
 void     GalaxianEmulator::cb_mem_write(uint16_t addr, uint8_t val) {
-        // Watchpoint 0x401A supprimé — boot stable, bruit inutile
-        // DEBUG POST : surveiller les écritures VRAM[0x01F3] (code d'erreur test mémoire)
-        // POST status écriture VRAM — ciblé sur l'adresse exacte 0x51F3 pour éviter faux positifs RAM.
-        // Supprimé une fois le boot stabilisé (non critique).
         g_bus_ptr->write(addr, val);
         if (g_emu_ptr) g_emu_ptr->log_memory_access(addr, val, "W");
     }
@@ -190,7 +186,6 @@ void GalaxianEmulator::log_opcode_trace(uint16_t pc_before, uint8_t opcode, uint
     static int count = 0;
     fprintf(fp_boot_trace, "CYC=%d PC=%04X OP=%02X SP=%04X AF=%04X IM=%d I=%02X\n",
         tstates, pc_before, opcode, cpu.SP, cpu.AF, cpu.IM, cpu.I);
-    // DIAG TEMP : 20000 opcodes pour couvrir tout le chemin de boot
     if (++count >= 20000) { boot_trace_done = true; fclose(fp_boot_trace); fp_boot_trace = nullptr; }
 #endif
 }
@@ -274,7 +269,6 @@ void GalaxianEmulator::log_sprites_snapshot(int frame) {
         uint8_t sx   = bus.spram[y_off + 3];
         int screen_y = 255 - sy; // Même formule que render_sprites()
         int screen_x = sx - 16;
-        // CORRECTED : bits 0=flipX, 1=flipY (hardware Galaxian réel)
         bool flip_x  = (attr & 0x01) != 0;
         bool flip_y  = (attr & 0x02) != 0;
         int  color   = attr & 0x07;
@@ -304,7 +298,6 @@ void GalaxianEmulator::connect_callbacks() {
 bool GalaxianEmulator::validate_ram() {
     constexpr int RAM_SIZE = sizeof(bus.ram);
     constexpr int VRAM_SIZE = sizeof(bus.vram);
-    // ⚠️ Pas de CRAM sur Galaxian — 0x5400-0x57FF est un mirror physique de VRAM
     constexpr int SPRAM_SIZE = sizeof(bus.spram);
     bool ok = true;
 
@@ -349,7 +342,6 @@ bool GalaxianEmulator::validate_ram() {
 
 // ============================================================================
 // Reset — réinitialisation complète avec validation RAM + surveillance SP
-// CORRECTION (06/08/2026) : État Z80 conforme au power-on réel.
 // Le Z80 démarre en IM=0, IFF1=false, I=0x00.
 // Le boot Galaxian configure lui-même IM2 + I pendant le POST (PC≈0x1B79).
 // ============================================================================
@@ -358,24 +350,14 @@ void GalaxianEmulator::reset() {
     connect_callbacks(); // ← INDISPENSABLE après z80_init
     memset(bus.ram,   0, sizeof(bus.ram));
     memset(bus.vram,  0, sizeof(bus.vram));
-    // ⚠️ Pas de CRAM sur Galaxian — 0x5400-0x57FF est un mirror physique de VRAM
     memset(bus.spram, 0, sizeof(bus.spram));
 
     // NE PAS toucher à bus.rom ici — la ROM reste intacte après load_roms()
 
     bus.regs = HardwareRegs{};
 
-    // =====================================================================
-    // CORRECTION (08/08/2026) : irq_enabled = false au power-on.
-    // Sur hardware Galaxian, le flip-flop NMI est INACTIF par défaut à l'allumage.
-    // Le jeu l'active lui-même en écrivant à 0x7001 pendant le POST.
-    // =====================================================================
-    bus.regs.irq_enabled = false;  // ← CORRIGÉ : NMI désactivé par défaut (hardware réel)
+    bus.regs.irq_enabled = false;  // NMI désactivé par défaut (§4 MAME)
 
-    // Autorise une NMI VBLANK pendant le boot pour briser les boucles infinies.
-    // Le hardware Galaxian a un flip-flop "NMI ON" initialisé à OFF, mais le premier front
-    // VBLANK après power-on active implicitement le mécanisme (comportement du circuit réel).
-    boot_nmi_allowed = 1;
 
     // Reset RAM POST detection flags (persist entre frames)
     ram_post_done = false;
@@ -384,12 +366,7 @@ void GalaxianEmulator::reset() {
     first_frame   = true;
 
 
-    // =====================================================================
-    // Reset configuration : État Z80 conforme au power-on réel.
-    // Le Z80 démarre en IM=0, IFF1=false, I=0x00.
-    // ⚠️ L'interruption Galaxian est une NMI (non maskable), pas une INT maskable.
-    //    La ligne INT du Z80 n'est même pas câblée sur le PCB. Tout passe par NMI.
-    // =====================================================================
+    // Reset configuration : NMI uniquement, pas d'INT (§4 MAME)
     cpu.IM   = 0;
     cpu.I    = 0x00;
     cpu.IFF1 = false;
@@ -513,13 +490,13 @@ void GalaxianEmulator::build_palette() {
 
     for (int i = 0; i < 32; i++) {
         uint8_t p = color_prom[i];
-        uint8_t r = lut3[(p >> 0) & 0x07];   // bits 2:0 → Rouge (CORRIGÉ)
-        uint8_t g = lut3[(p >> 3) & 0x07];   // bits 5:3 → Vert (CORRIGÉ)
-        uint8_t b = lut2[(p >> 6) & 0x03];   // bits 7:6 → Bleu (CORRIGÉ)
-        palette[i] = (static_cast<uint32_t>(0xFFu) << 24) | (static_cast<uint32_t>(r) << 16) | (static_cast<uint32_t>(g) << 8) | static_cast<uint32_t>(b); // ARGB
+        uint8_t r = lut3[(p >> 0) & 0x07];   // bits 2:0 → Rouge
+        uint8_t g = lut3[(p >> 3) & 0x07];   // bits 5:3 → Vert
+        uint8_t b = lut2[(p >> 6) & 0x03];   // bits 7:6 → Bleu
+        palette[i] = (static_cast<uint32_t>(0xE0u) << 24) | (static_cast<uint32_t>(r) << 16) | (static_cast<uint32_t>(g) << 8) | static_cast<uint32_t>(b); // ARGB, RGB_MAXIMUM=224 (MAME §5.4)
     }
 
-    LOG_INFO("[PALETTE] Corrigée — mapping Galaxian réel (RGB 3-3-2 bits)\n");
+    LOG_INFO("[PALETTE] MAME conforme — mapping RGB 3-3-2 bits, plafond 224\n");
 }
 
 // ============================================================================
@@ -604,6 +581,9 @@ void GalaxianEmulator::run_frame() {
     cpu.INT_line = false;
     cpu.NMI_pending = false;
 
+    // Détection du flip X pour recalculer l'origine LFSR étoiles (§5.6 MAME)
+    bool prev_flip_x = bus.regs.flip_screen_x;
+
     int cycles_done = 0;
 
     // NOTE : first_frame est un membre de classe qui persiste entre frames.
@@ -616,7 +596,6 @@ void GalaxianEmulator::run_frame() {
     uint8_t dbg_run_last_i_local = dbg_run_last_i;
     int dbg_frame_count_local = dbg_frame_count;
 
-    // BUG cosmétique : initialiser à la première vérification pour éviter faux changement au boot
     if (dbg_run_last_im_local == -1) {
         dbg_run_last_im_local = cpu.IM;
         dbg_run_last_i_local  = cpu.I;
@@ -775,6 +754,14 @@ void GalaxianEmulator::run_frame() {
     bus.update_audio_lfsr(star_lfsr);
 
     // ------------------------------------------------------------------
+    // Détection flip X — recalculer l'origine LFSR étoiles (§5.6 MAME)
+    // Le nombre de clocks comptés par frame diffère selon le sens de balayage.
+    // ------------------------------------------------------------------
+    if (bus.regs.flip_screen_x != prev_flip_x) {
+        bus.stars_update_origin(star_lfsr, bus.regs.flip_screen_x);
+    }
+
+    // ------------------------------------------------------------------
     // Étape 7 : Rendu de la frame
     // ------------------------------------------------------------------
     dbg_run_last_im = dbg_run_last_im_local;
@@ -803,8 +790,9 @@ void GalaxianEmulator::render_stars() {
 
     uint32_t shiftreg = star_lfsr;
 
-    // Clock le LFSR pour toute la frame (512 pixels × 256 lignes = 131072 clocks)
-    for (int clock = 0; clock < 512 * 256; clock++) {
+    // Clock le LFSR pour toute la frame — MAME §5.5 : période = 2^17 - 1 = 131071 clocks
+    // 512*256 = 131072 → 1 décalage par frame → scrolling horizontal continu des étoiles.
+    for (int clock = 0; clock < (1 << 17) - 1; clock++) {
         // Feedback LFSR selon MAME
         uint32_t feedback = ((shiftreg >> 12) ^ ~shiftreg) & 1;
         shiftreg = (shiftreg >> 1) | (feedback << 16);

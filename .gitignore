@@ -33,3 +33,8 @@ third_party/rlImGui/.git
 # OS files
 .DS_Store
 Thumbs.db
+
+# Documentation (excluded from commit)
+*.md
+RapportConformiteAudit_MAME.md
+Galaxian_Hardware_Documentation_V02.md

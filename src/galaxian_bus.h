@@ -94,10 +94,8 @@ public:
     // RAM 1KB avec mirror 0x0400 (MAME galaxian.cpp)
     uint8_t ram  [0x0400] = {};
     uint8_t vram [0x0400] = {};
-    // ⚠️ Pas de CRAM sur Galaxian : 0x5400-0x57FF est un mirror physique de VRAM (0x5000-0x53FF)
-    // La couleur des tuiles de fond vient de spram[col*2+1] & 0x07 (attribut de colonne dans l'OBJRAM)
-    // 0x5800-0x5FFF → miroir OBJRAM/SPRAM (256 octets)
-    // OBJRAM 512 octets : 0x5800-0x583F = attributs/scroll, 0x5840+ = sprites
+    // La couleur des tuiles de fond vient de spram[col*2+1] & 0x07 (attribut colonne OBJRAM)
+    // OBJRAM mirror(0x0700) : 512 octets décodés (MAME galaxian.cpp)
     uint8_t spram[0x0200] = {};
 
     InputState   input;
@@ -112,17 +110,15 @@ public:
         // RAM 1KB avec mirror 0x0400
         if (addr < 0x5000) return ram[(addr - 0x4000) & 0x03FF];
         if (addr < 0x5400) return vram[addr & 0x03FF];       // VRAM (1KB, 0x5000-0x53FF)
-        if (addr < 0x5800) return vram[addr & 0x03FF];       // Mirror physique de VRAM (0x5400-0x57FF) — MAME galaxian.cpp
-        // 0x5800-0x5FFF : zone non mappée sur Galaxian de base → bus flottant (0xFF)
-        // MAME galaxian_map_base() : pas de map pour cette plage, unmap_value_high() = 0xFF
-        if (addr < 0x6000) return 0xFF;                      // Bus flottant — non mappé sur hardware
+        if (addr < 0x5800) return vram[addr & 0x03FF];       // Mirror VRAM (0x5400-0x57FF) — MAME galaxian.cpp
+        // Zone non mappée → bus flottant (MAME unmap_value_high() = 0xFF)
+        if (addr < 0x6000) return 0xFF;
         if (addr < 0x6800) return build_in0();       // 0x6000-0x67FF
         if (addr < 0x7000) return build_in1();       // 0x6800-0x6FFF
         if (addr < 0x7800) return build_in2();       // 0x7000-0x77FF
 
-        // Watchdog — lecture réarme le compteur
-        // Le Z80 lit 0x7800 pour réarmer le watchdog. Retourne toujours 0xFF.
-        return 0xFF;                                 // Watchdog / inconnu — bus flottant
+        // Lecture 0x7800 réarme le watchdog (MAME : watchdog_timer_device::reset_r)
+        return 0xFF;
     }
 
     // ------------------------------------------------------------------------
@@ -141,7 +137,7 @@ public:
         // 0x5800-0x5FFF : zone non mappée sur Galaxian de base → écriture ignorée
         // MAME galaxian_map_base() : pas de map pour cette plage
         if (addr < 0x6000) return;                                    // Non mappé — ignore write
-        if (addr < 0x6800) { spram[addr & 0x00FF] = val; return; }   // OBJRAM/SPRAM (0x6000-0x67FF, mirror 0x01FF sur 0x5800)
+        if (addr < 0x6800) { spram[addr & 0x01FF] = val; return; }   // OBJRAM/SPRAM (0x5800-0x5FFF, mirror 0x0700 → 512 octets décodés)
 
         write_hw_reg(addr, val);
     }
@@ -228,8 +224,6 @@ public:
     VideoCounter   video_cnt;
     GalaxianAudioSynth audio_synth;  // Synthétiseur audio discret
     
-    // BUG P1 #4 CORRIGÉ : IM2VectorTable supprimée (code mort, la ROM fait office de table)
-
     const VideoCounter& video_counter() const { return video_cnt; }
 
     // ------------------------------------------------------------------------
@@ -248,9 +242,10 @@ public:
         if (is_latch) {
             // === Régions /LATCH (0x7000-0x77FF) === MAME galaxian.cpp
             switch (port_low) {
-                case 0x01:  // 0x7001 = NMI ON (flip-flop D, actif HIGH)
+                case 0x01:  // 0x7001 = NMI ON (flip-flop D, actif HIGH) — MAME galaxian.cpp irq_enable_w
                     regs.irq_enabled = b0;
-                    if (!b0 && cpu_ptr) cpu_ptr->INT_line = false;
+                    // Galaxian câbine la ligne VBLANK sur NMI (INPUT_LINE_NMI), pas INT.
+                    // La désactivation ne touche pas au flag NMI_pending (géré par z80_step).
                     break;
                 case 0x04:  // 0x7004 = Stars enable
                     regs.star_enable = b0;
@@ -287,12 +282,13 @@ public:
             }
         }
 
-        // Ports sonores (0x6800-0x6807) — indépendants des régions ci-dessus
+        // Ports sonores (0x6800-0x6807) — MAME galaxian.cpp §3.3
+        // 6800=FS1, 6801=FS2, 6802=FS3, 6803=HIT, 6804=n/c, 6805=FIRE, 6806=VOL1, 6807=VOL2
         if (addr >= 0x6800 && addr < 0x6808) {
             audio_synth.write_control(addr, val);
             uint8_t reg = addr & 0x07;
-            if (reg == 3) audio_synth.trigger_hit();
-            else if (reg == 4) audio_synth.trigger_fire();
+            if (reg == 3)       audio_synth.trigger_hit();   // HIT
+            else if (reg == 5)  audio_synth.trigger_fire();  // FIRE (6804=n/c ignoré)
         }
 
         // Pitch register (0x7800) — conservé pour compatibilité
@@ -314,6 +310,26 @@ public:
     }
 
     // ------------------------------------------------------------------------
+    // Recalcul de l'origine du LFSR étoiles — MAME §5.6 galaxian_flip_screen_x_w
+    // Indispensable avant tout flip screen : le nombre de clocks comptés par
+    // frame diffère selon le sens de balayage, sans quoi les étoiles se
+    // désynchronisent instantanément à l'écran (§5.5).
+    // ------------------------------------------------------------------------
+    void stars_update_origin(uint32_t &star_lfsr, bool flip_x) {
+        // Période LFSR = 2^17 - 1 = 131071 clocks par frame (MAME §5.5)
+        constexpr int STAR_RNG_PERIOD = ((1 << 17) - 1);
+        uint32_t shiftreg = star_lfsr;
+        // Avancer le LFSR d'un cycle supplémentaire selon le flip pour compenser
+        // le décalage de 0 ou 2 clocks/frame dû aux bascules D en 6B (§5.5)
+        int extra_cycles = flip_x ? 1 : 3;
+        for (int c = 0; c < extra_cycles; c++) {
+            uint32_t feedback = ((shiftreg >> 12) ^ ~shiftreg) & 1;
+            shiftreg = (shiftreg >> 1) | (feedback << 16);
+        }
+        star_lfsr = shiftreg;
+    }
+
+    // ------------------------------------------------------------------------
     // Watchdog — MAME : set_vblank_count("screen", 8)
     // Le Z80 lit 0x7800 pour réarmer. Reset si 8 VBLANK sans lecture.
     // ------------------------------------------------------------------------
@@ -324,12 +340,12 @@ public:
     // Appelée à chaque front montant VBLANK (une fois par frame)
     void tick_watchdog() {
         regs.watchdog_vblanks++;
-        if (regs.watchdog_vblanks >= WATCHDOG_MAX_VBLANKS) {
+        if (regs.watchdog_vblanks >= HardwareRegs::WATCHDOG_MAX_VBLANKS) {
             printf("[WATCHDOG] Timeout — reset CPU (%d VBLANKs sans lecture 0x7800)\n", regs.watchdog_vblanks);
         }
     }
 
     bool watchdog_timed_out() const {
-        return regs.watchdog_vblanks >= WATCHDOG_MAX_VBLANKS;
+        return regs.watchdog_vblanks >= HardwareRegs::WATCHDOG_MAX_VBLANKS;
     }
 };
