@@ -331,6 +331,17 @@ void z80_nmi(Z80* cpu) {
 
 int z80_step(Z80* cpu) {
     // ------------------------------------------------------------------
+    // EI délai : sur Z80 réel, EI active IFF1 DURING l'instruction suivante.
+    // On doit traiter ei_delay AVANT tout check HALT/NMI/INT pour que
+    // le CPU puisse être réveillé par interruption après un EI suivi de HALT.
+    // ------------------------------------------------------------------
+    if (cpu->ei_delay) {
+        cpu->ei_delay = false;
+        cpu->IFF1 = true;
+        cpu->IFF2 = true;
+    }
+
+    // ------------------------------------------------------------------
     // NMI : edge-triggered, prioritaire sur INT, ne dépend PAS de IFF1/IM.
     // Le signal est consommé immédiatement lors de la prise d'interruption.
     // ------------------------------------------------------------------
@@ -343,7 +354,7 @@ int z80_step(Z80* cpu) {
     // INT maskable : échantillonnage conforme Z80 datasheet.
     // Galaxian utilise une INT maskable pilotée par VBLANK via irq_enabled.
     // ------------------------------------------------------------------
-    if (cpu->INT_line && cpu->IFF1 && !cpu->ei_delay) {
+    if (cpu->INT_line && cpu->IFF1) {
         cpu->halted = false;
         z80_interrupt(cpu, 0xFF);
         cpu->INT_line = false;
@@ -364,14 +375,6 @@ int z80_step(Z80* cpu) {
         case 0xED: cycles = z80_exec_ed(cpu); break;
         case 0xFD: cycles = z80_exec_fd(cpu); break;
         default:   cycles = z80_exec_main(cpu, opcode); break;
-    }
-
-    if (cpu->ei_delay) {
-        cpu->ei_delay = false;
-        cpu->IFF1 = true;
-        // EI active aussi IFF2 pour permettre les interruptions maskables après l'instruction suivante.
-        cpu->IFF2 = true;
-        printf("[EI] PC=%04X cycles=%d\n", cpu->PC, cpu->total_cycles);
     }
 
     // Enregistrer pc_after dans le traceur d'opcodes

@@ -45,7 +45,12 @@ public:
     uint8_t  gfx_rom[0x1000]      = {};   // 1h.bin + 1k.bin (4KB total)
     uint8_t  color_prom[0x20]     = {};   // 6l.bpr (32 octets)
     uint32_t palette[32]          = {};   // Palette précalculée ARGB
-    uint32_t framebuffer[256*224] = {};   // Image finale
+    // Framebuffer interne élargi x3 en largeur pour le LFSR étoiles (768px)
+    // Le LFSR change tous les 1.5 cycles CPU, donc chaque pixel écran correspond
+    // à 3 positions consécutives du LFSR qu'il faut échantillonner séparément.
+    static constexpr int FB_W = 256 * 3;   // 768 pixels internes
+    static constexpr int FB_H = 224;       // hauteur conservée
+    std::vector<uint32_t> framebuffer;     // Image finale (768x224) — heap, pas stack
 
     // Starfield LFSR 17 bits — initialisation à 0 (0x1FFFF bloque le LFSR)
     uint32_t star_lfsr = 0;
@@ -58,16 +63,10 @@ public:
 
     // RAM POST detection — persist entre les frames
     bool ram_post_done = false;      // true quand SP change FFFF→autre
-    bool ei_forced     = false;      // EI forcé une seule fois
-    bool sp_ei_done    = false;      // IFF1=1 forcé après RAM POST (persist entre frames)
 
-    // First frame detection — forcer IFF1=1 au premier frame (SP=0xFFFF au reset)
-    bool first_frame   = true;       // true au premier frame, reset après exécution
-
-    // Boot NMI allowance — autorise une NMI VBLANK pendant le boot pour briser les boucles infinies.
-    // Le hardware Galaxian a un flip-flop "NMI ON" initialisé à OFF, mais le premier front VBLANK
-    // après power-on active implicitement le mécanisme (comportement du circuit réel).
-    int  boot_nmi_allowed = 1;       // 1 pendant boot, passe à 0 après première NMI autorisée
+    // First frame / boot detection — désactive le watchdog pendant le POST RAM
+    bool first_frame   = true;       // true au premier frame
+    int  boot_frames   = 0;          // compteur de frames pendant le boot (watchdog disabled)
 
     // Debug counters (membre pour permettre reset propre)
     uint8_t  dbg_last_i_seen     = 0xFF;
@@ -96,8 +95,11 @@ public:
     bool is_stuck() const;                           // true si CPU bloqué
 
     // Accès direct pour ImGui (lectures sur &cpu, &bus)
-    const uint32_t* get_framebuffer() const { return framebuffer; }
+    const uint32_t* get_framebuffer() const { return framebuffer.data(); }
     const uint32_t* get_palette()     const { return palette; }
+
+    // Downsampling framebuffer x3 → écran 256px (nearest-neighbor selon H8)
+    void downsample_to_screen(uint32_t* out, int h_phase) const;
 
 private:
     // Pointeur global nécessaire pour les raw function pointers C du Z80
@@ -116,6 +118,7 @@ private:
     void render_stars();
     void render_tilemap();
     void render_sprites();
+    void render_bullets();  // Shells (0x00-0x1F) et Missile (0x20) — tirs Galaxian
 
     // Palette
     void build_palette();

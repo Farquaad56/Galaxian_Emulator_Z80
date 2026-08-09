@@ -111,8 +111,9 @@ public:
         if (addr < 0x5000) return ram[(addr - 0x4000) & 0x03FF];
         if (addr < 0x5400) return vram[addr & 0x03FF];       // VRAM (1KB, 0x5000-0x53FF)
         if (addr < 0x5800) return vram[addr & 0x03FF];       // Mirror VRAM (0x5400-0x57FF) — MAME galaxian.cpp
-        // Zone non mappée → bus flottant (MAME unmap_value_high() = 0xFF)
-        if (addr < 0x6000) return 0xFF;
+        // OBJRAM — Zone lisible et writable (0x5800-0x5FFF, mirror 0x0700 → 512 octets décodés)
+        // Le CPU lit cette zone pour les collisions, le test RAM et la logique des sprites.
+        if (addr < 0x6000) return spram[addr & 0x01FF];
         if (addr < 0x6800) return build_in0();       // 0x6000-0x67FF
         if (addr < 0x7000) return build_in1();       // 0x6800-0x6FFF
         if (addr < 0x7800) return build_in2();       // 0x7000-0x77FF
@@ -134,10 +135,8 @@ public:
         }
         if (addr < 0x5400) { vram[addr & 0x03FF] = val; return; }   // VRAM (0x5000-0x53FF)
         if (addr < 0x5800) { vram[addr & 0x03FF] = val; return; }   // Mirror physique de VRAM (0x5400-0x57FF) — MAME galaxian.cpp
-        // 0x5800-0x5FFF : zone non mappée sur Galaxian de base → écriture ignorée
-        // MAME galaxian_map_base() : pas de map pour cette plage
-        if (addr < 0x6000) return;                                    // Non mappé — ignore write
-        if (addr < 0x6800) { spram[addr & 0x01FF] = val; return; }   // OBJRAM/SPRAM (0x5800-0x5FFF, mirror 0x0700 → 512 octets décodés)
+        // OBJRAM — Écriture mémoire-synchro (0x5800-0x5FFF, mirror 0x0700 → 512 octets)
+        if (addr < 0x6800) { spram[addr & 0x01FF] = val; return; }   // OBJRAM/SPRAM writable
 
         write_hw_reg(addr, val);
     }
@@ -269,12 +268,12 @@ public:
                     break;
                 case 0x03:  // 0x6003 = Coin counter (ignoré)
                     break;
-                case 0x04:  // 0x6004 = Résistance son (555 timer) — ignoré ici
-                    break;
-                case 0x05:  // 0x6005 = Résistance son (555 timer) — ignoré ici
-                    break;
-                case 0x06:  // 0x6006 = Résistance son (555 timer) — ignoré ici
-                    break;
+                case 0x04:  // 0x6004 = DAC bit 0 (1MΩ) → VCO fond sonore
+                    audio_synth.write_dac(val); break;
+                case 0x05:  // 0x6005 = DAC bit 1 (470kΩ) → VCO fond sonore
+                    audio_synth.write_dac(val); break;
+                case 0x06:  // 0x6006 = DAC bit 2 (220kΩ) → VCO fond sonore
+                    audio_synth.write_dac(val); break;
                 case 0x07:  // 0x6007 = Start lamps (ignoré)
                     break;
                 default:

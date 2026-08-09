@@ -74,6 +74,8 @@ int main() {
 
     bool paused = false;
     float audio_buffer[AUDIO_FRAMES * 2]; // Stéréo interleaved (float 32-bit)
+    // Tampon intermédiaire pour le downsampling du framebuffer x3 → écran 256px
+    uint32_t screen_buffer[EMU_W * EMU_H] = {};
 
     // ========================================================================
     // Boucle principale
@@ -127,6 +129,13 @@ int main() {
         if (!paused) {
             emu.run_frame();
 
+            // Downsampling : framebuffer interne 768x224 → écran 256x224
+            // Le LFSR étoiles utilise un facteur x3 ; on choisit la phase H courante
+            // pour préserver l'aliasing CRT au lieu de lisser les pixels.
+            static int h_phase_counter = 0;
+            emu.downsample_to_screen(screen_buffer, h_phase_counter % 3);
+            h_phase_counter++;
+
             // Ne mettre à jour l'audio que si le buffer a été consommé
             if (IsAudioStreamProcessed(audio_stream)) {
                 emu.bus.render_audio(audio_buffer, AUDIO_FRAMES);
@@ -135,9 +144,9 @@ int main() {
         }
 
         // --------------------------------------------------------------------
-        // Mise à jour de la texture Raylib avec le framebuffer émulé
+        // Mise à jour de la texture Raylib avec le framebuffer downsamplé (256x224)
         // --------------------------------------------------------------------
-        UpdateTexture(screen_tex, emu.get_framebuffer());
+        UpdateTexture(screen_tex, screen_buffer);
 
         // --------------------------------------------------------------------
         // Rendu
