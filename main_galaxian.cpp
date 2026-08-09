@@ -8,19 +8,29 @@
 #include "galaxian_emulator.h"
 #include "ui/debug_ui.h"
 
+// Rotation 90° horaire (comme MAME ROT90) : src 768×224 → dst 224×768
+static std::vector<uint32_t> rot_buf;
+
+void blit_rotated(const uint32_t* src, uint32_t* dst) {
+    for (int y = 0; y < 224; y++)
+        for (int x = 0; x < 768; x++)
+            dst[x * 224 + (223 - y)] = src[y * 768 + x];
+}
+
 int main() {
     SetTraceLogLevel(LOG_WARNING);
 
-    // Configuration fenêtre : écran émulé 768×3 px + panneaux ImGui (décalé pour éviter chevauchement)
-    // FB_W = 256*3 = 768 (sous-pixels), FB_H = 224. Étirement vertical ×3 pour aspect CRT.
+    // Configuration fenêtre : écran portrait 224×768 pivoté, + panneaux ImGui
+    // FB_W = 768 (sous-pixels), FB_H = 224. Rotation ROT90 → texture 224×768.
     constexpr int SCALE = 3;
-    constexpr int FB_W = GalaxianEmulator::FB_W;  // 768 sous-pixels (framebuffer natif)
+    constexpr int FB_W = GalaxianEmulator::FB_W;  // 768 sous-pixels
     constexpr int FB_H = GalaxianEmulator::FB_H;  // 224 lignes
-    constexpr int SCREEN_X = 280;
+    constexpr int SCREEN_X = 20;
     constexpr int SCREEN_Y = 20;
     constexpr int PANELS_WIDTH = 900;
-    constexpr int WIN_W = SCREEN_X + FB_W * SCALE + PANELS_WIDTH;
-    constexpr int WIN_H = SCREEN_Y + FB_H * SCALE + 120;
+    // Affichage : 224×3 × 768 pixels (pixels carrés) + panneau à droite
+    constexpr int WIN_W = SCREEN_X + 224 * SCALE + PANELS_WIDTH;
+    constexpr int WIN_H = SCREEN_Y + 768 + 120;
 
     InitWindow(WIN_W, WIN_H, "Galaxian Emulator");
     SetTargetFPS(60);
@@ -58,11 +68,12 @@ int main() {
     emu.reset();
 
     // ========================================================================
-    // Texture Raylib pour l'écran émulé — 768×224 (framebuffer natif)
-    // Le framebuffer interne est 768×224 (×3 sous-pixels pour LFSR étoiles).
-    // On dessine directement avec DrawTexturePro, stretch vertical ×3.
+    // Texture Raylib pour l'écran émulé — 224×768 (portrait, après rotation ROT90)
+    // Le framebuffer interne est 768×224 ; on le pivot à l'affichage.
     // ========================================================================
-    Image img = GenImageColor(FB_W, FB_H, BLACK);  // 768×224 — framebuffer natif
+    rot_buf.resize(224 * 768);
+
+    Image img = GenImageColor(224, 768, BLACK);   // texture portrait 224×768
     Texture2D screen_tex = LoadTextureFromImage(img);
     UnloadImage(img);
 
@@ -138,9 +149,10 @@ int main() {
         }
 
         // --------------------------------------------------------------------
-        // Mise à jour de la texture Raylib — framebuffer natif 768×224
+        // Mise à jour de la texture Raylib — rotation ROT90 (768×224 → 224×768)
         // --------------------------------------------------------------------
-        UpdateTexture(screen_tex, emu.get_framebuffer());
+        blit_rotated(emu.get_framebuffer(), rot_buf.data());
+        UpdateTexture(screen_tex, rot_buf.data());
 
         // --------------------------------------------------------------------
         // Rendu
@@ -148,10 +160,10 @@ int main() {
         BeginDrawing();
         ClearBackground(BLACK);
 
-        // Écran émulé — stretch vertical ×3 uniquement pour aspect CRT.
-        // Largeur native 768 (sous-pixels), hauteur ×3 (672) → pixels carrés sur écran.
-        Rectangle src = { 0.0f, 0.0f, (float)FB_W, (float)FB_H };
-        Rectangle dst = { (float)SCREEN_X, (float)SCREEN_Y, (float)FB_W, (float)FB_H * 3.0f };
+        // Écran émulé — rotation 90° : texture 224×768 → stretch horizontal ×3
+        Rectangle src = { 0.0f, 0.0f, (float)224, (float)768 };
+        Rectangle dst = { (float)SCREEN_X, (float)SCREEN_Y,
+                          (float)224 * SCALE, (float)768 };
         DrawTexturePro(screen_tex, src, dst, {0.0f, 0.0f}, 0.0f, WHITE);
 
         // Label PAUSE
@@ -161,7 +173,7 @@ int main() {
 
         // Raccourcis clavier affichés en bas de l'écran émulé
         DrawText("P=Pause  R=Reset  F1=Test  F2=Service  5=Coin  1/2=Start",
-                 SCREEN_X + 4, SCREEN_Y + FB_H * SCALE - 16, 10, GRAY);
+                 SCREEN_X + 4, SCREEN_Y + 768 - 16, 10, GRAY);
 
         // --------------------------------------------------------------------
         // ImGui — panels de débogage (droite)
