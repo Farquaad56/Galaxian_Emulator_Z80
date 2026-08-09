@@ -319,7 +319,6 @@ void z80_interrupt(Z80* cpu, uint8_t data_bus) {
 }
 
 void z80_nmi(Z80* cpu) {
-    printf("[NMI-ENTER] PC=%04X SP=%04X IFF1=%d\n", cpu->PC, cpu->SP, cpu->IFF1 ? 1 : 0);
     cpu->halted = false;
     cpu->IFF2 = cpu->IFF1;
     cpu->IFF1 = false;
@@ -330,37 +329,26 @@ void z80_nmi(Z80* cpu) {
 }
 
 int z80_step(Z80* cpu) {
-    // ====================================================================
-    // ÉTAPE 1 : Sauvegarder l'état ei_delay pour ce step
-    // Un Z80 réel n'accepte PAS les interruptions pendant l'instruction
-    // qui suit EI — elle s'exécute intégralement avec IFF1/IFF2 désactivés.
-    // ====================================================================
-    bool was_ei_delay = cpu->ei_delay;
-
-    // ====================================================================
-    // ÉTAPE 2 : Gestion des interruptions (NMI prioritaire, puis INT)
-    // UNIQUEMENT si ei_delay n'est PAS actif — sinon l'instruction suivante
-    // doit s'exécuter sans être interrompue (comportement Z80 datasheet).
-    // ====================================================================
-    if (!was_ei_delay) {
-        // NMI : edge-triggered, prioritaire sur INT, indépendant de IFF1/IM
-        if (cpu->NMI_pending) {
-            cpu->NMI_pending = false;
-            z80_nmi(cpu);
-            return 11;  // NMI = 11 T-states (4+5+2)
-        }
-
-        // INT maskable : dépend de IFF1 et du mode IM
-        if (cpu->INT_line && cpu->IFF1) {
-            cpu->halted = false;
-            z80_interrupt(cpu, 0xFF);  // Galaxian : bus data = 0xFF (RST 38h)
-            cpu->INT_line = false;
-            return (cpu->IM == 2) ? 19 : 13;
-        }
+    // NMI : non masquable, prioritaire — prise MÊME pendant la fenêtre EI
+    if (cpu->NMI_pending) {
+        cpu->NMI_pending = false;
+        z80_nmi(cpu);
+        return 11;
     }
 
+    // INT maskable : bloquée pendant l'instruction qui suit EI
+    bool was_ei_delay = cpu->ei_delay;
+    if (!was_ei_delay && cpu->INT_line && cpu->IFF1) {
+        cpu->halted = false;
+        z80_interrupt(cpu, 0xFF);
+        cpu->INT_line = false;
+        return (cpu->IM == 2) ? 19 : 13;
+    }
+
+    if (was_ei_delay) cpu->ei_delay = false;
+
     // ====================================================================
-    // ÉTAPE 3 : Clear ei_delay AVANT exécution de l'opcode
+    // ÉTAPE 2 : HALT — CPU en pause jusqu'à INT/NMI
     // Si l'opcode qui suit s'avère être un autre EI, il repositionnera
     // ei_delay = true dans l'opcode handler lui-même.
     // ====================================================================

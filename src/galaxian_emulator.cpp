@@ -33,16 +33,6 @@ static GalaxianEmulator* g_emu_ptr = nullptr;
 uint8_t  GalaxianEmulator::cb_mem_read (uint16_t addr) {
     uint8_t val = g_bus_ptr->read(addr);
     
-    // Log des lectures dans la zone I/O (0x6000-0x7FFF) — diagnostic périodique
-    if (addr >= 0x6000 && addr < 0x8000) {
-        static int io_read_count = 0;
-        io_read_count++;
-        if ((io_read_count % 5000) == 0) {
-            printf("[READ-IO] count=%d ADDR=%04X VAL=%02X\n",
-                   io_read_count, addr, val);
-        }
-    }
-    
     // Watchdog : réarmer le compteur quand on lit 0x7800
     if (addr >= 0x7800 && addr < 0x8000) {
         g_bus_ptr->reset_watchdog();
@@ -268,7 +258,7 @@ void GalaxianEmulator::log_sprites_snapshot(int frame) {
         uint8_t attr = bus.spram[y_off + 2];
         uint8_t sx   = bus.spram[y_off + 3];
         int screen_y = 255 - sy; // Même formule que render_sprites()
-        int screen_x = sx - 16;
+        int screen_x = sx + 1;   // Aligné sur le rendu render_sprites()
         bool flip_x  = (attr & 0x01) != 0;
         bool flip_y  = (attr & 0x02) != 0;
         int  color   = attr & 0x07;
@@ -359,9 +349,6 @@ void GalaxianEmulator::reset() {
     bus.regs.irq_enabled = false;  // NMI désactivé par défaut (§4 MAME)
 
 
-    // Reset RAM POST detection flags
-    ram_post_done = false;
-
     // Reset configuration : NMI uniquement, pas d'INT (§4 MAME)
     cpu.IM   = 0;
     cpu.I    = 0x00;
@@ -369,7 +356,7 @@ void GalaxianEmulator::reset() {
     cpu.IFF2 = false;
     bus.regs.first_irq_triggered = false;
 
-    star_lfsr = 0x1FFFF;  // Valeur non nulle pour éviter que le LFSR ne se bloque (0 → tous XOR=0)
+    star_lfsr = 0;   // Le feedback inversé (bit12 XOR NOT bit0) ne se bloque pas à 0 (§6.3 MAME)
     trace_log.clear();
     boot_trace_done = false;
     boot_finished = false;
@@ -480,9 +467,10 @@ bool GalaxianEmulator::load_roms(const char* dir) {
 // ============================================================================
 void GalaxianEmulator::build_palette() {
     // Résistances pondérées normalisées 0-255 pour 3 bits (8 niveaux)
-    static const uint8_t lut3[8] = { 0x00, 0x24, 0x49, 0x6D, 0x92, 0xB6, 0xDB, 0xFF };
-    // Résistances pondérées normalisées 0-255 pour 2 bits (4 niveaux)
-    static const uint8_t lut2[4] = { 0x00, 0x55, 0xAA, 0xFF };
+    // Poids par conductances (1k/470/220), somme = 224 — MAME §5.4
+    static const uint8_t lut3[8] = { 0x00, 0x1D, 0x3E, 0x5B, 0x85, 0xA2, 0xC3, 0xE0 };
+    // Résistances pondérées pour 2 bits (470Ω/220Ω), somme = 224
+    static const uint8_t lut2[4] = { 0x00, 0x48, 0x98, 0xE0 };
 
     for (int i = 0; i < 32; i++) {
         uint8_t p = color_prom[i];
@@ -964,6 +952,10 @@ void GalaxianEmulator::render_sprites() {
 // Layout par entrée : [Y][color/attr][reserved][X]
 // ============================================================================
 void GalaxianEmulator::render_bullets() {
+    // Clipping hardware : sprites/tirs bornés à [17, 255] en X (§5.2 MAME)
+    int xmin_b = bus.regs.flip_screen_x ? 0   : 17;
+    int xmax_b = bus.regs.flip_screen_x ? 238 : 255;
+
     // Shells — OBJRAM base 0x60, entrées 0 à 6 (spram[0x60] à spram[0x7C])
     // §5.2 MAME : m_bullets_base = 0x60
     for (int i = 0; i < 7; i++) {
@@ -972,15 +964,19 @@ void GalaxianEmulator::render_bullets() {
         // §5.3 : x -= 4 pour alignement line buffer
         int sx = static_cast<int>(bus.spram[base + 3]) - 4;
 
-        if (sx < 0 || sx >= 256) continue;
+        if (sx < xmin_b || sx > xmax_b) continue;
         int screen_y = 255 - sy_raw;
         if (screen_y < 0 || screen_y >= 224) continue;
 
         // Shell = ligne horizontale blanche pure (réseau 100Ω dédié, §5.4)
         uint32_t white = 0xFFFFFFFF;
-        int sx3 = sx * 3;
+        int sx_b = sx;
+        if (bus.regs.flip_screen_x) sx_b = 255 - sx_b;   // Flip global sur tirs (§5.2)
+        int sx3 = sx_b * 3;
         for (int dx = 0; dx < 12; dx++) {
-            int fx3 = sx3 + dx;
+            int fx = sx_b + dx;
+            if (fx < xmin_b || fx > xmax_b) continue;
+            int fx3 = fx * 3;
             if (fx3 >= FB_W) continue;
             framebuffer[screen_y * FB_W + fx3] = white;
         }
@@ -993,15 +989,19 @@ void GalaxianEmulator::render_bullets() {
         // §5.3 : x -= 4
         int sx = static_cast<int>(bus.spram[base + 3]) - 4;
 
-        if (sx < 0 || sx >= 256) return;
+        if (sx < xmin_b || sx > xmax_b) return;
         int screen_y = 255 - sy_raw;
         if (screen_y < 0 || screen_y >= 224) return;
 
-        // Missile = ligne horizontale jaune pure (réseau 100Ω dédié, §5.4)
-        uint32_t yellow = (static_cast<uint32_t>(224u) << 24) | (0xFFu << 16) | (0xF8u << 8);
-        int sx3 = sx * 3;
+        // Missile = jaune pur (§5.4 MAME) — R=255, G=255, B=0
+        uint32_t yellow = (0xFFu << 24) | (0xFFu << 16) | (0xFFu << 8) | 0x00u;
+        int sx_b = sx;
+        if (bus.regs.flip_screen_x) sx_b = 255 - sx_b;   // Flip global sur tirs (§5.2)
+        int sx3 = sx_b * 3;
         for (int dx = 0; dx < 12; dx++) {
-            int fx3 = sx3 + dx;
+            int fx = sx_b + dx;
+            if (fx < xmin_b || fx > xmax_b) continue;
+            int fx3 = fx * 3;
             if (fx3 >= FB_W) continue;
             framebuffer[screen_y * FB_W + fx3] = yellow;
         }

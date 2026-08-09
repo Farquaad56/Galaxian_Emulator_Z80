@@ -22,8 +22,8 @@ struct CycleTrace {
 // ============================================================================
 // NOTE: Tous les logs désactivés car le boot est stable et l'émulation fonctionne.
 //       Réactiver temporairement pour debug en changeant 0 → 1.
-#define LOG_BOOT_TRACE      1   // boot_opcode_trace.log    : 512 premiers opcodes au boot
-#define LOG_IRQ_EVENTS      1   // irq_events.log           : trigger/ack VBLANK (INT correction)
+#define LOG_BOOT_TRACE      0   // boot_opcode_trace.log    : 512 premiers opcodes au boot
+#define LOG_IRQ_EVENTS      0   // irq_events.log           : trigger/ack VBLANK (INT correction)
 #define LOG_HW_REG_ACCESS   0   // hw_reg_access.log        : écritures hardware 0x6000-0x7FFF
 #define LOG_VRAM_SNAPSHOTS  0   // vram_snapshots.log       : VRAM/CRAM toutes les 60 frames
 #define LOG_CPU_STATE       0   // cpu_state_keymoments.log : registres CPU aux moments clés
@@ -61,9 +61,6 @@ public:
 
     // Boot sequence tracking
     bool     boot_finished    = false;       // true quand le boot a terminé (PC sort de zone POST)
-
-    // RAM POST detection — persist entre les frames
-    bool ram_post_done = false;      // true quand SP change FFFF→autre
 
     // Debug counters (membre pour permettre reset propre)
     uint8_t  dbg_last_i_seen     = 0xFF;
@@ -115,7 +112,7 @@ private:
     void render_stars();
     void render_tilemap();
     void render_sprites();
-    void render_bullets();  // Shells (0x00-0x1F) et Missile (0x20) — tirs Galaxian
+    void render_bullets();  // ✅ Shells (0x60-0x7C) et Missile (0x80) — §5.2/§7 m_bullets_base=0x60
 
     // Palette
     void build_palette();

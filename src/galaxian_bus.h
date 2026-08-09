@@ -112,8 +112,8 @@ public:
         // 0x4800-0x4FFF : NON CONNECTÉ sur la borne d'origine (§3.1) — bus flottant = 0xFF
         if (addr < 0x5000) return 0xFF;
         if (addr < 0x5400) return vram[addr & 0x03FF];       // VRAM (1KB, 0x5000-0x53FF)
-        // 0x5400-0x57FF : non connecté — retourne 0xFF (§3.1 MAME)
-        if (addr < 0x5800) return 0xFF;
+        // Miroir 0x0400 : 0x5400-0x57FF mappe sur VRAM (§3.1/§3.5 MAME)
+        if (addr < 0x5800) return vram[addr & 0x03FF];
         // OBJRAM 256 octets (0x5800-0x58FF) + miroir (0x5900-0x5FFF, MAME mirror(0x0700))
         if (addr < 0x6000) return spram[(addr - 0x5800) & 0xFF];
         if (addr < 0x6800) return build_in0();       // 0x6000-0x67FF
@@ -138,8 +138,8 @@ public:
         // 0x4800-0x4FFF : non connecté (§3.1 MAME) — ignorer l'écriture
         if (addr < 0x5000) return;
         if (addr < 0x5400) { vram[addr & 0x03FF] = val; return; }   // VRAM (0x5000-0x53FF)
-        // 0x5400-0x57FF : non connecté — ignorer l'écriture (§3.1 MAME)
-        if (addr < 0x5800) return;
+        // Miroir 0x0400 : 0x5400-0x57FF mappe sur VRAM (§3.1/§3.5 MAME)
+        if (addr < 0x5800) { vram[addr & 0x03FF] = val; return; }
         // OBJRAM — Écriture mémoire-synchro (0x5800-0x5FFF, mirror 0x0700 → 256 octets)
         if (addr < 0x6000) { spram[(addr - 0x5800) & 0xFF] = val; return; }   // OBJRAM/SPRAM writable
 
@@ -246,10 +246,10 @@ public:
         if (is_latch) {
             // === Régions /LATCH (0x7000-0x77FF) === MAME galaxian.cpp
             switch (port_low) {
-                case 0x01:  // 0x7001 = NMI ON (flip-flop D, actif HIGH) — MAME galaxian.cpp irq_enable_w
+                case 0x01:  // 0x7001 = NMI ON/OFF (flip-flop D, actif HIGH) — MAME galaxian.cpp irq_enable_w
                     regs.irq_enabled = b0;
-                    // Galaxian câbine la ligne VBLANK sur NMI (INPUT_LINE_NMI), pas INT.
-                    // La désactivation ne touche pas au flag NMI_pending (géré par z80_step).
+                    // NMI ON = 0 force la ligne à CLEAR (§4 MAME)
+                    if (!b0 && cpu_ptr) cpu_ptr->NMI_pending = false;
                     break;
                 case 0x04:  // 0x7004 = Stars enable
                     regs.star_enable = b0;
@@ -279,7 +279,8 @@ public:
                     audio_synth.write_dac(1, b0); break;
                 case 0x06:  // 0x6006 = DAC bit 2 (220kΩ) → VCO fond sonore
                     audio_synth.write_dac(2, b0); break;
-                case 0x07:  // 0x6007 = Start lamps (ignoré)
+                case 0x07:  // 0x6007 = DAC bit 3 (résistance 100kΩ) → VCO fond sonore (§3.2 MAME)
+                    audio_synth.write_dac(3, b0);
                     break;
                 default:
                     break;
@@ -295,10 +296,9 @@ public:
             else if (reg == 5)  audio_synth.trigger_fire();  // FIRE (6804=n/c ignoré)
         }
 
-        // Pitch register (0x7800) — conservé pour compatibilité
+        // Registre PITCH (0x7800) — latch 8 bits complet, modulation VCO (§3.4/§6.5 MAME)
         if ((addr & 0x07FF) == 0x7800) {
-            float pitch_factor = 1.0f + (val & 0x0F) * 0.05f;
-            (void)pitch_factor;
+            audio_synth.write_pitch(val);
         }
     }
 

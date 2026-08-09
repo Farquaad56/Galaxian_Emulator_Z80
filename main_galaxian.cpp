@@ -58,11 +58,11 @@ int main() {
     emu.reset();
 
     // ========================================================================
-    // Texture Raylib pour l'écran émulé — 256×224 (downsampled from 768×224)
+    // Texture Raylib pour l'écran émulé — 768×224 (framebuffer natif)
     // Le framebuffer interne est 768×224 (×3 sous-pixels pour LFSR étoiles).
-    // On downsampe vers 256×224 avant mise à jour de la texture.
+    // On dessine directement avec DrawTexturePro, stretch vertical ×3.
     // ========================================================================
-    Image img = GenImageColor(256, 224, BLACK);
+    Image img = GenImageColor(FB_W, FB_H, BLACK);  // 768×224 — framebuffer natif
     Texture2D screen_tex = LoadTextureFromImage(img);
     UnloadImage(img);
 
@@ -138,15 +138,9 @@ int main() {
         }
 
         // --------------------------------------------------------------------
-        // Mise à jour de la texture Raylib — downsample 768×224 → 256×224
-        // h_phase = 0 (phase H fixée) pour préserver l'aliasing du LFSR.
-        // Le filtre POINT préserve le damier V1 XOR H8.
+        // Mise à jour de la texture Raylib — framebuffer natif 768×224
         // --------------------------------------------------------------------
-        {
-            uint32_t screen_buf[256 * 224];
-            emu.downsample_to_screen(screen_buf, 0);
-            UpdateTexture(screen_tex, screen_buf);
-        }
+        UpdateTexture(screen_tex, emu.get_framebuffer());
 
         // --------------------------------------------------------------------
         // Rendu
@@ -155,9 +149,9 @@ int main() {
         ClearBackground(BLACK);
 
         // Écran émulé — stretch vertical ×3 uniquement pour aspect CRT.
-        // Largeur native 256, hauteur ×3 (672) → pixels carrés sur écran.
-        Rectangle src = { 0.0f, 0.0f, (float)256, (float)FB_H };
-        Rectangle dst = { (float)SCREEN_X, (float)SCREEN_Y, (float)256 * SCALE, (float)FB_H * 3.0f };
+        // Largeur native 768 (sous-pixels), hauteur ×3 (672) → pixels carrés sur écran.
+        Rectangle src = { 0.0f, 0.0f, (float)FB_W, (float)FB_H };
+        Rectangle dst = { (float)SCREEN_X, (float)SCREEN_Y, (float)FB_W, (float)FB_H * 3.0f };
         DrawTexturePro(screen_tex, src, dst, {0.0f, 0.0f}, 0.0f, WHITE);
 
         // Label PAUSE

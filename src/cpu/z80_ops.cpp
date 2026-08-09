@@ -701,11 +701,8 @@ int z80_exec_main(Z80* cpu, uint8_t opcode) {
         // ====================================================================
 
         case 0xFB: { /* EI — Enable Interrupts : activer les interruptions avec délai d'une instruction */
-            // BUG 2 CORRECTED : Ne PAS activer IFF1 immédiatement.
-            // Sur Z80 réel, EI active les interruptions seulement après
-            // l'instruction suivante (pour éviter ré-interruption immédiate).
-            cpu->IFF2 = true;                                   // Préparer IFF2 pour restauration
-            cpu->ei_delay = true;                               // IFF1 activé au prochain z80_step()
+            // Sur Z80 réel, EI active IFF1/IFF2 seulement après l'instruction suivante.
+            cpu->ei_delay = true;                               // IFF1/IFF2 activés en fin de z80_step()
 #ifdef GALAXIAN_DEBUG_IM2
             printf("[IM2-SETUP] PC=%04X FB EI\n", cpu->PC - 1);
 #endif

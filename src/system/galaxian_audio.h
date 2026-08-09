@@ -79,6 +79,14 @@ public:
     // DAC 4-bit → fréquence VCO fond sonore (bourdonnement continu)
     // Chaque port 0x6004-0x6007 écrit sur un bit spécifique du DAC agrégé.
     // bit_pos = 0 pour 6004, 1 pour 6005, 2 pour 6006 (conformément MAME lfo_freq_w).
+    // Registre PITCH (0x7800) — modulation de la fréquence VCO par 8 bits
+    void write_pitch(uint8_t val) {
+        float pitch_factor = 1.0f + (val & 0x0F) * 0.05f;
+        m_bg_freq *= pitch_factor;
+        if (m_bg_freq < 20.0f) m_bg_freq = 20.0f;
+        if (m_bg_freq > 600.0f) m_bg_freq = 600.0f;
+    }
+
     void write_dac(int bit_pos, bool bit_val) {
         m_dac_value = (m_dac_value & ~(1 << bit_pos)) | (bit_val ? (1 << bit_pos) : 0);
         float dac_norm = static_cast<float>(m_dac_value) / 15.0f; // 0-1
