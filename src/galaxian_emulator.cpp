@@ -361,7 +361,6 @@ void GalaxianEmulator::reset() {
 
     // Reset RAM POST detection flags
     ram_post_done = false;
-    first_frame   = true;
     boot_frames   = 0;
 
 
@@ -585,10 +584,8 @@ void GalaxianEmulator::run_frame() {
 
     int cycles_done = 0;
 
-    // NOTE : first_frame est un membre de classe qui persiste entre frames.
     // Le jeu Galaxian configure lui-même I + IM2 + EI au boot (PC≈0x1B79).
     // On ne force RIEN — on laisse le jeu faire son travail.
-    // local_first_frame non utilisée — supprimée.
 
     // Debug : tracer les changements de IM et I (configuration IM2 par le jeu)
     int dbg_run_last_im_local = dbg_run_last_im;
@@ -644,17 +641,11 @@ void GalaxianEmulator::run_frame() {
         // Le hardware Galaxian lève une NMI au passage de la ligne 223 à 224.
         // La NMI ne dépend PAS de IFF1 — elle est prise immédiatement.
         //
-        // CORRECTION BOOT (08/08/2026) : autoriser une NMI VBLANK pendant le boot
-        // même si irq_enabled=false. Le hardware Galaxian a un flip-flop "NMI ON"
-        // initialisé à OFF, mais le premier front VBLANK après power-on active
-        // implicitement le mécanisme (comportement du circuit réel). Sans cette NMI,
-        // le boot boucle éternellement dans la séquence VRAM clear à 0x1A5C.
-        // ------------------------------------------------------------------
         // NMI VBLANK : le hardware Galaxian a un flip-flop "NMI ON" (0x7001).
-        // Pendant le boot, irq_enabled est false mais la première NMI doit
-        // quand même passer pour réveiller le CPU de sa boucle d'attente.
+        // Le jeu doit explicitement activer irq_enabled via écriture sur 0x7001
+        // avant que la NMI ne soit autorisée (conformément MAME §8.1).
         if (bus.video_cnt.take_vblank_edge()) {
-            bool nmi_allowed = first_frame || bus.regs.irq_enabled;
+            bool nmi_allowed = bus.regs.irq_enabled;
             if (nmi_allowed && !cpu.NMI_pending) {
                 cpu.NMI_pending = true;
                 log_irq_event("TRIGGER", cpu.total_cycles);

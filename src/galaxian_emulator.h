@@ -64,8 +64,7 @@ public:
     // RAM POST detection — persist entre les frames
     bool ram_post_done = false;      // true quand SP change FFFF→autre
 
-    // First frame / boot detection — désactive le watchdog pendant le POST RAM
-    bool first_frame   = true;       // true au premier frame
+    // Boot detection — désactive le watchdog pendant le POST RAM
     int  boot_frames   = 0;          // compteur de frames pendant le boot (watchdog disabled)
 
     // Debug counters (membre pour permettre reset propre)

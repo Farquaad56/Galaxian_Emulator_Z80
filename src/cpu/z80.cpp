@@ -330,18 +330,9 @@ void z80_nmi(Z80* cpu) {
 }
 
 int z80_step(Z80* cpu) {
-    // ------------------------------------------------------------------
-    // NMI : edge-triggered, prioritaire sur INT, ne dépend PAS de IFF1/IM.
-    // Le signal est consommé immédiatement lors de la prise d'interruption.
-    // ------------------------------------------------------------------
-    if (cpu->NMI_pending) {
-        cpu->NMI_pending = false;
-        z80_nmi(cpu);
-        return 11; // NMI = 11 T-states (4+5+2)
-    }
-
-    // Si ei_delay est actif, on ne vérifie PAS INT ici.
+    // Si ei_delay est actif, on ne vérifie PAS INT/NMI ici.
     // Sur Z80 réel, EI bloque les interruptions pendant l'instruction suivante.
+
     if (cpu->halted) {
         cpu->R = (cpu->R & 0x80) | ((cpu->R + 1) & 0x7F);
         return 4;
@@ -359,7 +350,6 @@ int z80_step(Z80* cpu) {
     }
 
     // Enregistrer pc_after dans le traceur d'opcodes
-    // CORRECTION : vérifier g_opcode_trace_count > 0 (pas >=) pour accéder au DERNIER entry
     if (g_opcode_trace_enabled && g_opcode_trace_count > 0) {
         g_opcode_trace[g_opcode_trace_count - 1].pc_after = cpu->PC;
         g_opcode_trace[g_opcode_trace_count - 1].tstates = cycles;
@@ -374,6 +364,15 @@ int z80_step(Z80* cpu) {
         cpu->ei_delay = false;
         cpu->IFF1 = true;
         cpu->IFF2 = true;
+    }
+
+    // NMI : edge-triggered, prioritaire sur INT, ne dépend PAS de IFF1/IM.
+    // Mais elle ne peut être servie qu'APRÈS une instruction complète,
+    // pour respecter la temporisation EI du Z80 réel.
+    if (cpu->NMI_pending) {
+        cpu->NMI_pending = false;
+        z80_nmi(cpu);
+        return 11; // NMI = 11 T-states (4+5+2)
     }
 
     // INT maskable : échantillonnage conforme Z80 datasheet.
