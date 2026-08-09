@@ -23,6 +23,7 @@ int main() {
     constexpr int WIN_H = SCREEN_Y + FB_H * SCALE + 120;
 
     InitWindow(WIN_W, WIN_H, "Galaxian Emulator");
+    SetConsoleOutputCP(65001);  // UTF-8 pour console Windows (tirets cadratin, accents)
     SetTargetFPS(60);
 
     // Initialiser rlImGui (setup + fonts FontAwesome)
