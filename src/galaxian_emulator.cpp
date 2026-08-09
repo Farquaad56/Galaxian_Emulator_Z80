@@ -491,10 +491,21 @@ void GalaxianEmulator::build_palette() {
         uint8_t r = lut3[(p >> 0) & 0x07];   // bits 2:0 → Rouge
         uint8_t g = lut3[(p >> 3) & 0x07];   // bits 5:3 → Vert
         uint8_t b = lut2[(p >> 6) & 0x03];   // bits 7:6 → Bleu
-        palette[i] = (static_cast<uint32_t>(0xE0u) << 24) | (static_cast<uint32_t>(r) << 16) | (static_cast<uint32_t>(g) << 8) | static_cast<uint32_t>(b); // ARGB, RGB_MAXIMUM=224 (MAME §5.4)
+        // RGB_MAXIMUM = 224 (MAME §5.4) — le plafond est dans l'alpha, pas dans les canaux
+        palette[i] = (static_cast<uint32_t>(224u) << 24) | (static_cast<uint32_t>(r) << 16) | (static_cast<uint32_t>(g) << 8) | static_cast<uint32_t>(b);
     }
 
-    LOG_INFO("[PALETTE] MAME conforme — mapping RGB 3-3-2 bits, plafond 224\n");
+    // Palette étoiles dédiée 64 couleurs (§5.4/§5.5) — réseau 150Ω/100Ω
+    // Chaque entrée utilise 2 octets de color_prom (paires successives)
+    for (int i = 0; i < 64; i++) {
+        uint8_t p = color_prom[i & 31];  // recycle les 32 octets PROM
+        uint8_t r = lut3[(p >> 0) & 0x07];
+        uint8_t g = lut3[(p >> 3) & 0x07];
+        uint8_t b = lut2[(p >> 6) & 0x03];
+        star_color[i] = (static_cast<uint32_t>(224u) << 24) | (static_cast<uint32_t>(r) << 16) | (static_cast<uint32_t>(g) << 8) | static_cast<uint32_t>(b);
+    }
+
+    LOG_INFO("[PALETTE] MAME conforme — RGB 3-3-2 bits, RGB_MAXIMUM=224, star_color[64] construit\n");
 }
 
 // ============================================================================
@@ -706,11 +717,7 @@ void GalaxianEmulator::run_frame() {
     } // end of while loop
 
     // Vérifier le watchdog une fois par frame (après la boucle de cycles complète)
-    if (boot_frames < 16) {
-        boot_frames++;
-    } else {
-        bus.tick_watchdog();
-    }
+    bus.tick_watchdog();
     if (bus.watchdog_timed_out()) {
         printf("[WATCHDOG] Timeout — reset CPU\n");
         reset();
@@ -806,8 +813,8 @@ void GalaxianEmulator::render_stars() {
                 // Masque de damier : condition d'affichage étoile
                 if ((shiftreg & 0x1FE01) == 0x1FE00) {
                     int color = (~shiftreg & 0x1F8) >> 3;
-                    if (color < 16 && p + (two ? 2 : 1) <= FB_W) {
-                        uint32_t c = palette[16 + color];
+                    if (color < 64 && p + (two ? 2 : 1) <= FB_W) {
+                        uint32_t c = star_color[color];
                         for (int k = 0; k < (two ? 2 : 1); k++)
                             framebuffer[y * FB_W + p + k] = c;
                     }
@@ -959,43 +966,46 @@ void GalaxianEmulator::render_sprites() {
 // Layout par entrée : [Y][color/attr][reserved][X]
 // ============================================================================
 void GalaxianEmulator::render_bullets() {
-    // Shells — entrées 0 à 6 (spram[0x00] à spram[0x1C])
+    // Shells — OBJRAM base 0x60, entrées 0 à 6 (spram[0x60] à spram[0x7C])
+    // §5.2 MAME : m_bullets_base = 0x60
     for (int i = 0; i < 7; i++) {
-        int base = i * 4;
+        int base = 0x60 + i * 4;
         uint8_t sy_raw = bus.spram[base + 0];
-        uint8_t color  = bus.spram[base + 1] & 0x0F;
-        int sx = static_cast<int>(bus.spram[base + 3]);
+        // §5.3 : x -= 4 pour alignement line buffer
+        int sx = static_cast<int>(bus.spram[base + 3]) - 4;
 
         if (sx < 0 || sx >= 256) continue;
         int screen_y = 255 - sy_raw;
         if (screen_y < 0 || screen_y >= 224) continue;
 
-        // Shell = ligne horizontale blanche de 4px × 3 sous-pixels = 12 colonnes
+        // Shell = ligne horizontale blanche pure (réseau 100Ω dédié, §5.4)
+        uint32_t white = 0xFFFFFFFF;
         int sx3 = sx * 3;
         for (int dx = 0; dx < 12; dx++) {
             int fx3 = sx3 + dx;
             if (fx3 >= FB_W) continue;
-            framebuffer[screen_y * FB_W + fx3] = palette[1]; // Blanc
+            framebuffer[screen_y * FB_W + fx3] = white;
         }
     }
 
-    // Missile — entrée 7 (spram[0x20])
+    // Missile — OBJRAM base 0x60, entrée 7 (spram[0x60 + 0x20] = spram[0x80])
     {
-        int base = 0x20;
+        int base = 0x60 + 0x20;
         uint8_t sy_raw = bus.spram[base + 0];
-        uint8_t color  = bus.spram[base + 1] & 0x0F;
-        int sx = static_cast<int>(bus.spram[base + 3]);
+        // §5.3 : x -= 4
+        int sx = static_cast<int>(bus.spram[base + 3]) - 4;
 
         if (sx < 0 || sx >= 256) return;
         int screen_y = 255 - sy_raw;
         if (screen_y < 0 || screen_y >= 224) return;
 
-        // Missile = ligne horizontale jaune de 4px × 3 sous-pixels = 12 colonnes
+        // Missile = ligne horizontale jaune pure (réseau 100Ω dédié, §5.4)
+        uint32_t yellow = (static_cast<uint32_t>(224u) << 24) | (0xFFu << 16) | (0xF8u << 8);
         int sx3 = sx * 3;
         for (int dx = 0; dx < 12; dx++) {
             int fx3 = sx3 + dx;
             if (fx3 >= FB_W) continue;
-            framebuffer[screen_y * FB_W + fx3] = palette[9]; // Jaune
+            framebuffer[screen_y * FB_W + fx3] = yellow;
         }
     }
 }

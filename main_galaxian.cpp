@@ -12,15 +12,15 @@ int main() {
     SetTraceLogLevel(LOG_WARNING);
 
     // Configuration fenêtre : écran émulé 768×3 px + panneaux ImGui (décalé pour éviter chevauchement)
-    // FB_W = 256*3 = 768 (sous-pixels), FB_H = 224. SCALE=3 donne 768×672 pixels écran.
+    // FB_W = 256*3 = 768 (sous-pixels), FB_H = 224. Étirement vertical ×3 pour aspect CRT.
     constexpr int SCALE = 3;
-    constexpr int EMU_W = GalaxianEmulator::FB_W; // 768 sous-pixels
-    constexpr int EMU_H = GalaxianEmulator::FB_H; // 224 lignes
+    constexpr int FB_W = GalaxianEmulator::FB_W;  // 768 sous-pixels (framebuffer natif)
+    constexpr int FB_H = GalaxianEmulator::FB_H;  // 224 lignes
     constexpr int SCREEN_X = 280;
     constexpr int SCREEN_Y = 20;
     constexpr int PANELS_WIDTH = 900;
-    constexpr int WIN_W = SCREEN_X + EMU_W * SCALE + PANELS_WIDTH;
-    constexpr int WIN_H = SCREEN_Y + EMU_H * SCALE + 120;
+    constexpr int WIN_W = SCREEN_X + FB_W * SCALE + PANELS_WIDTH;
+    constexpr int WIN_H = SCREEN_Y + FB_H * SCALE + 120;
 
     InitWindow(WIN_W, WIN_H, "Galaxian Emulator");
     SetTargetFPS(60);
@@ -58,9 +58,11 @@ int main() {
     emu.reset();
 
     // ========================================================================
-    // Texture Raylib pour l'écran émulé — 768×224 (framebuffer ×3 direct)
+    // Texture Raylib pour l'écran émulé — 256×224 (downsampled from 768×224)
+    // Le framebuffer interne est 768×224 (×3 sous-pixels pour LFSR étoiles).
+    // On downsampe vers 256×224 avant mise à jour de la texture.
     // ========================================================================
-    Image img = GenImageColor(EMU_W, EMU_H, BLACK);
+    Image img = GenImageColor(256, 224, BLACK);
     Texture2D screen_tex = LoadTextureFromImage(img);
     UnloadImage(img);
 
@@ -136,9 +138,15 @@ int main() {
         }
 
         // --------------------------------------------------------------------
-        // Mise à jour de la texture Raylib avec le framebuffer ×3 direct (768x224)
+        // Mise à jour de la texture Raylib — downsample 768×224 → 256×224
+        // h_phase = 0 (phase H fixée) pour préserver l'aliasing du LFSR.
+        // Le filtre POINT préserve le damier V1 XOR H8.
         // --------------------------------------------------------------------
-        UpdateTexture(screen_tex, emu.get_framebuffer());
+        {
+            uint32_t screen_buf[256 * 224];
+            emu.downsample_to_screen(screen_buf, 0);
+            UpdateTexture(screen_tex, screen_buf);
+        }
 
         // --------------------------------------------------------------------
         // Rendu
@@ -146,10 +154,10 @@ int main() {
         BeginDrawing();
         ClearBackground(BLACK);
 
-        // Écran émulé — DrawTexturePro pour aspect CRT ×3 vertical (768×672)
-        Rectangle src = { 0.0f, 0.0f, (float)EMU_W, (float)EMU_H };
-        Rectangle dst = { (float)SCREEN_X, (float)SCREEN_Y, (float)EMU_W * SCALE / SCALE, (float)EMU_H * SCALE };
-        // Équivalent : src=768×224 → dst=768×672 (= ×3 vertical pour aspect CRT)
+        // Écran émulé — stretch vertical ×3 uniquement pour aspect CRT.
+        // Largeur native 256, hauteur ×3 (672) → pixels carrés sur écran.
+        Rectangle src = { 0.0f, 0.0f, (float)256, (float)FB_H };
+        Rectangle dst = { (float)SCREEN_X, (float)SCREEN_Y, (float)256 * SCALE, (float)FB_H * 3.0f };
         DrawTexturePro(screen_tex, src, dst, {0.0f, 0.0f}, 0.0f, WHITE);
 
         // Label PAUSE
@@ -159,7 +167,7 @@ int main() {
 
         // Raccourcis clavier affichés en bas de l'écran émulé
         DrawText("P=Pause  R=Reset  F1=Test  F2=Service  5=Coin  1/2=Start",
-                 SCREEN_X + 4, SCREEN_Y + EMU_H * SCALE - 16, 10, GRAY);
+                 SCREEN_X + 4, SCREEN_Y + FB_H * SCALE - 16, 10, GRAY);
 
         // --------------------------------------------------------------------
         // ImGui — panels de débogage (droite)

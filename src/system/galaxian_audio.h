@@ -65,14 +65,14 @@ public:
             case 1: m_tone2_on = (val & 0x01) != 0; break;
             case 2: m_tone3_on = (val & 0x01) != 0; break;
             case 3: m_noise_enable = (val & 0x01) != 0; break;
-            case 4: trigger_fire(); break;
-            case 5:
-                // Volume bits 0-3
+            case 4: /* n/c — pas de registre à cette adresse */ break;
+            case 5: trigger_fire(); break;
+            case 6:
+                // Volume bits 0-3 (VOL1 sur port 6806)
                 m_master_volume = (val & 0x0F) / 15.0f;
                 if (m_master_volume < 0.01f) m_master_volume = 0.5f; // Default
                 break;
-            case 6: /* Vol 2 - ignoré */ break;
-            case 7: /* Noise mute - ignoré */ break;
+            case 7: /* VOL2 — ignoré */ break;
         }
     }
 

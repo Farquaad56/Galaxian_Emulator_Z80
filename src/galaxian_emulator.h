@@ -44,7 +44,8 @@ public:
     // ROM graphique et palette (indépendantes du bus Z80)
     uint8_t  gfx_rom[0x1000]      = {};   // 1h.bin + 1k.bin (4KB total)
     uint8_t  color_prom[0x20]     = {};   // 6l.bpr (32 octets)
-    uint32_t palette[32]          = {};   // Palette précalculée ARGB
+    uint32_t palette[32]          = {};   // Palette précalculée ARGB (sprites/tuiles)
+    uint32_t star_color[64]       = {};   // 64 couleurs étoiles dédiées (§5.4/§5.5)
     // Framebuffer interne élargi x3 en largeur pour le LFSR étoiles (768px)
     // Le LFSR change tous les 1.5 cycles CPU, donc chaque pixel écran correspond
     // à 3 positions consécutives du LFSR qu'il faut échantillonner séparément.

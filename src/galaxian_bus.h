@@ -95,8 +95,8 @@ public:
     uint8_t ram  [0x0400] = {};
     uint8_t vram [0x0400] = {};
     // La couleur des tuiles de fond vient de spram[col*2+1] & 0x07 (attribut colonne OBJRAM)
-    // OBJRAM mirror(0x0700) : 512 octets décodés (MAME galaxian.cpp)
-    uint8_t spram[0x0200] = {};
+    // OBJRAM mirror(0x0700) : 256 octets décodés (MAME galaxian.cpp map(0x5800,0x58ff).mirror(0x0700))
+    uint8_t spram[0x0100] = {};
 
     InputState   input;
     HardwareRegs regs;
@@ -110,10 +110,11 @@ public:
         // RAM 1KB avec mirror 0x0400
         if (addr < 0x5000) return ram[(addr - 0x4000) & 0x03FF];
         if (addr < 0x5400) return vram[addr & 0x03FF];       // VRAM (1KB, 0x5000-0x53FF)
-        if (addr < 0x5800) return vram[addr & 0x03FF];       // Mirror VRAM (0x5400-0x57FF) — MAME galaxian.cpp
-        // OBJRAM — Zone lisible et writable (0x5800-0x5FFF, mirror 0x0700 → 512 octets décodés)
+        // 0x5400-0x57FF : non connecté — retourne 0xFF (§3.1 MAME)
+        if (addr < 0x5800) return 0xFF;
+        // OBJRAM — Zone lisible et writable (0x5800-0x5FFF, mirror 0x0700 → 256 octets décodés)
         // Le CPU lit cette zone pour les collisions, le test RAM et la logique des sprites.
-        if (addr < 0x6000) return spram[addr & 0x01FF];
+        if (addr < 0x6000) return spram[addr & 0x00FF];
         if (addr < 0x6800) return build_in0();       // 0x6000-0x67FF
         if (addr < 0x7000) return build_in1();       // 0x6800-0x6FFF
         if (addr < 0x7800) return build_in2();       // 0x7000-0x77FF
@@ -129,14 +130,17 @@ public:
         // ROM = read-only — pas d'interception IM2
         if (addr < 0x4000) return;
         // RAM 1KB avec mirror 0x0400
-        if (addr < 0x5000) {
+        if (addr < 0x4800) {
             ram[(addr - 0x4000) & 0x03FF] = val;
             return;
         }
+        // 0x4800-0x4FFF : non connecté (§3.1 MAME) — ignorer l'écriture
+        if (addr < 0x5000) return;
         if (addr < 0x5400) { vram[addr & 0x03FF] = val; return; }   // VRAM (0x5000-0x53FF)
-        if (addr < 0x5800) { vram[addr & 0x03FF] = val; return; }   // Mirror physique de VRAM (0x5400-0x57FF) — MAME galaxian.cpp
-        // OBJRAM — Écriture mémoire-synchro (0x5800-0x5FFF, mirror 0x0700 → 512 octets)
-        if (addr < 0x6800) { spram[addr & 0x01FF] = val; return; }   // OBJRAM/SPRAM writable
+        // 0x5400-0x57FF : non connecté — ignorer l'écriture (§3.1 MAME)
+        if (addr < 0x5800) return;
+        // OBJRAM — Écriture mémoire-synchro (0x5800-0x5FFF, mirror 0x0700 → 256 octets)
+        if (addr < 0x6000) { spram[addr & 0x00FF] = val; return; }   // OBJRAM/SPRAM writable
 
         write_hw_reg(addr, val);
     }

@@ -330,9 +330,6 @@ void z80_nmi(Z80* cpu) {
 }
 
 int z80_step(Z80* cpu) {
-    // Si ei_delay est actif, on ne vérifie PAS INT/NMI ici.
-    // Sur Z80 réel, EI bloque les interruptions pendant l'instruction suivante.
-
     if (cpu->halted) {
         cpu->R = (cpu->R & 0x80) | ((cpu->R + 1) & 0x7F);
         return 4;
@@ -355,20 +352,8 @@ int z80_step(Z80* cpu) {
         g_opcode_trace[g_opcode_trace_count - 1].tstates = cycles;
     }
 
-    // ------------------------------------------------------------------
-    // EI délai : sur Z80 réel, EI active IFF1/IFF2 APRÈS l'exécution
-    // complète de l'instruction suivante. On traite ici pour que le CPU
-    // puisse répondre aux interruptions uniquement après cette instruction.
-    // ------------------------------------------------------------------
-    if (cpu->ei_delay) {
-        cpu->ei_delay = false;
-        cpu->IFF1 = true;
-        cpu->IFF2 = true;
-    }
-
     // NMI : edge-triggered, prioritaire sur INT, ne dépend PAS de IFF1/IM.
-    // Mais elle ne peut être servie qu'APRÈS une instruction complète,
-    // pour respecter la temporisation EI du Z80 réel.
+    // Elle ne peut être servie qu'APRÈS une instruction complète.
     if (cpu->NMI_pending) {
         cpu->NMI_pending = false;
         z80_nmi(cpu);
@@ -377,13 +362,25 @@ int z80_step(Z80* cpu) {
 
     // INT maskable : échantillonnage conforme Z80 datasheet.
     // Galaxian utilise une INT maskable pilotée par VBLANK via irq_enabled.
-    // Vérifiée APRÈS ei_delay pour respecter la temporisation EI.
     // ------------------------------------------------------------------
     if (cpu->INT_line && cpu->IFF1) {
         cpu->halted = false;
         z80_interrupt(cpu, 0xFF);
         cpu->INT_line = false;
         return (cpu->IM == 2) ? 19 : 13;
+    }
+
+    // ------------------------------------------------------------------
+    // EI délai : sur Z80 réel, EI active IFF1/IFF2 APRÈS l'exécution
+    // complète de l'instruction suivante. L'instruction suivant EI s'exécute
+    // intégralement avec les INT désactivées (IFF1=0). C'est seulement à la
+    // fin de ce step que ei_delay est résolu, permettant aux INT d'être
+    // acceptées au prochain cycle.
+    // ------------------------------------------------------------------
+    if (cpu->ei_delay) {
+        cpu->ei_delay = false;
+        cpu->IFF1 = true;
+        cpu->IFF2 = true;
     }
 
     return cycles;
