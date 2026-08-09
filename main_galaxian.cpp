@@ -2,6 +2,7 @@
 // Programme principal — Émulateur Galaxian (Raylib + Dear ImGui + rlImGui)
 // ============================================================================
 
+#include <windows.h>
 #include "raylib.h"
 #include "rlImGui.h"
 #include "imgui.h"
