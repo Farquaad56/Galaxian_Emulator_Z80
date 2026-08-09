@@ -46,6 +46,8 @@ void     GalaxianEmulator::cb_mem_write(uint16_t addr, uint8_t val) {
         g_bus_ptr->write(addr, val);
         if (g_emu_ptr) {
             g_emu_ptr->log_memory_access(addr, val, "W");
+            // Logger aussi les accès registre hardware (complète hw_reg_access.log)
+            g_emu_ptr->log_hw_reg_access(addr, val, "WRITE");
             BootChecker& bc = g_emu_ptr->boot_chk;
             if      (addr >= 0x5000 && addr < 0x5800) bc.mark(2);                    // VRAM
             else if (addr >= 0x5800 && addr < 0x6000) bc.mark(3);                    // OBJRAM
@@ -197,7 +199,7 @@ void GalaxianEmulator::log_irq_event(const char* event, int cycles) {
     if (!LOG_IRQ_EVENTS || !fp_irq_events) return;
     fprintf(fp_irq_events, "[CYC %07d] %-12s", cycles, event);
     if (strcmp(event, "TRIGGER") == 0)
-        fprintf(fp_irq_events, " VBLANK raised by hw (v_counter=%d, h_counter=%d)", bus.emptyo_cnt.v_counter, bus.emptyo_cnt.h_counter);
+        fprintf(fp_irq_events, " VBLANK raised by hw (v_counter=%d, h_counter=%d)", bus.video_cnt.v_counter, bus.video_cnt.h_counter);
     else if (strcmp(event, "TAKEN") == 0)
         fprintf(fp_irq_events, " Z80 answered IRQ IM2 -> PC=%04X push SP=%04X", cpu.PC, cpu.SP);
     else if (strcmp(event, "ACK") == 0)
@@ -401,7 +403,7 @@ void GalaxianEmulator::reset() {
             (in0 & 0x80) ? "RELACHE (normal)" : "PRESSE(!!!)");
     }
 
-    bus.emptyo_cnt.reset_frame();
+    bus.video_cnt.reset_frame();
     boot_chk.mark(1);  // CPU reset (PC=0000)
 }
 
@@ -584,7 +586,7 @@ void GalaxianEmulator::run_frame() {
     constexpr int CYCLES_FRAME = 264 * 384 / 2; // 50688
 
     // Reset du compteur vid??o + vblank_triggered au d??but de chaque frame
-    bus.emptyo_cnt.reset_frame();
+    bus.video_cnt.reset_frame();
 
     // Les lignes d'interruption doivent ??tre basses en d??but de frame
     cpu.INT_line = false;
@@ -637,13 +639,13 @@ void GalaxianEmulator::run_frame() {
         int block_cycles = std::min(50, remaining);
 
         // Avancer le vid??o pour ce bloc : 1 cycle CPU = 2 cycles pixel
-        bus.emptyo_cnt.step(block_cycles * 2);
+        bus.video_cnt.step(block_cycles * 2);
 
         // ------------------------------------------------------------------
         // ??tape 2 : D??tecter VBLANK ??? marquer que l'INT doit ??tre lev??e.
         // Le hardware Galaxian l??ve l'INT VBLANK quand v_counter atteint 224.
         // ------------------------------------------------------------------
-        if (dbg_prev_vcounter >= 0 && bus.emptyo_cnt.v_counter < dbg_prev_vcounter) {
+        if (dbg_prev_vcounter >= 0 && bus.video_cnt.v_counter < dbg_prev_vcounter) {
             LOG_VERBOSE("[FRAME-RESET] Wrap detected\n");
         }
 
@@ -655,7 +657,7 @@ void GalaxianEmulator::run_frame() {
         // NMI VBLANK : le hardware Galaxian a un flip-flop "NMI ON" (0x7001).
         // Le jeu doit explicitement activer irq_enabled via ??criture sur 0x7001
         // avant que la NMI ne soit autoris??e (conform??ment MAME ??8.1).
-        if (bus.emptyo_cnt.take_vblank_edge()) {
+        if (bus.video_cnt.take_vblank_edge()) {
             bool nmi_allowed = bus.regs.irq_enabled;
             if (nmi_allowed && !cpu.NMI_pending) {
                 cpu.NMI_pending = true;
@@ -663,7 +665,7 @@ void GalaxianEmulator::run_frame() {
             }
         }
 
-        dbg_prev_vcounter = bus.emptyo_cnt.v_counter;
+        dbg_prev_vcounter = bus.video_cnt.v_counter;
 
         // ------------------------------------------------------------------
         // ??tape 3 : Ex??cuter le Z80
@@ -705,7 +707,8 @@ void GalaxianEmulator::run_frame() {
     if (bus.watchdog_timed_out()) {
         boot_chk.note_watchdog_reset();
         bus.regs.watchdog_vblanks = 0;   // r??arme, ??vite le double reset
-        reset();
+        // TEMPORAIRE : d??sactiv?? le reset pour diagnostiquer un POST long
+        // reset();
         return;
     }
 
@@ -1113,3 +1116,4 @@ void GalaxianEmulator::log_render_stats(int frame) {
         stars_active ? 'Y' : 'N', is_empty ? 'Y' : 'N');
 #endif
 }
+

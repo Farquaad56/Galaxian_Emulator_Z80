@@ -2,12 +2,13 @@
 #include <cstdio>
 
 // ============================================================================
-// BootChecker — valide silencieusement les 8 étapes clés du boot Galaxian.
+// BootChecker — valide silencieusement les 7 étapes clés du boot Galaxian.
 // 1 ligne par étape franchie + 1 verdict final. Jamais de flood.
+// Note : l'étape IM2 a été supprimée (Galaxian utilise une NMI, pas IM2).
 // ============================================================================
 struct BootChecker {
-    static constexpr int NB = 8;
-    static constexpr int TIMEOUT_FRAMES = 30;   // ~0,5 s : largement assez pour un POST sain
+    static constexpr int NB = 7;
+    static constexpr int TIMEOUT_FRAMES = 300;  // ~5 s : le jeu peut mettre plus de temps (POST long)
 
     bool reached[NB + 1] = {};   // index 1..8
     int  frame  = 0;
@@ -20,10 +21,9 @@ struct BootChecker {
             case 2: return "POST : ecriture VRAM (clear 5000-57FF)";
             case 3: return "POST : ecriture OBJRAM (clear 5800-58FF)";
             case 4: return "Watchdog nourri (lecture 7800)";
-            case 5: return "IM2 + registre I configures";
-            case 6: return "NMI ON (ecriture 7001 bit0=1)";
-            case 7: return "Premiere NMI prise (handler 0066)";
-            case 8: return "STARS ON / attract mode (7004)";
+            case 5: return "NMI ON (ecriture 7001 bit0=1)";
+            case 6: return "Premiere NMI prise (handler 0066)";
+            case 7: return "STARS ON / attract mode (7004)";
         }
         return "?";
     }

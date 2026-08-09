@@ -182,11 +182,11 @@ public:
         if (input.fire)    v |= (1 << 4);
         // Bit 5 = DIP Cabinet (0=Upright, 1=Cocktail) — valeur brute du switch
         if (input.dipsw_cabinet) v |= (1 << 5);
-        // Bit 6 = TEST (IP_ACTIVE_LOW — MAME galaxian.cpp) → idle HIGH (=bit actif quand relâché)
-        if (!input.test_switch)  v |= (1 << 6);
-        // Bit 7 = SERVICE (IP_ACTIVE_LOW — MAME galaxian.cpp) → idle HIGH (=bit actif quand relâché)
-        if (!input.service)      v |= (1 << 7);
-        return v;                                // IN0 idle = 0xC0
+        // Bit 6 = TEST (IP_ACTIVE_HIGH — MAME galaxian.cpp) → 1 SEULEMENT si enfoncé
+        if (input.test_switch)   v |= (1 << 6);
+        // Bit 7 = SERVICE (IP_ACTIVE_HIGH — MAME galaxian.cpp) → 1 SEULEMENT si enfoncé
+        if (input.service)       v |= (1 << 7);
+        return v;                                // IN0 idle = 0x00
     }
 
     // ------------------------------------------------------------------------
@@ -235,69 +235,43 @@ public:
         // Filtre par plage d'adresse (mémoire ou I/O reconstruite)
         if (addr < 0x6000 || addr >= 0x8000) return;
 
-        bool b0 = (val & 1) != 0;
-        uint8_t port_low = static_cast<uint8_t>(addr & 0x0F);
-        bool is_latch = (addr & 0x0800) != 0; // true pour 0x7xxx, false pour 0x6xxx
+        const bool   b0   = (val & 1) != 0;
+        const uint8_t off = static_cast<uint8_t>(addr & 0x07);  // miroirs 0x07F8 — seuls bits 0-2 comptent
 
-        if (is_latch) {
-            // === Régions /LATCH (0x7000-0x77FF) === MAME galaxian.cpp
-            switch (port_low) {
-                case 0x01:  // 0x7001 = NMI ON/OFF (flip-flop D, actif HIGH) — MAME galaxian.cpp irq_enable_w
-                    regs.irq_enabled = b0;
-                    // CLEAR_LINE §4 : écriture 0x7001=0 force la ligne NMI à CLEAR
-                    if (!b0 && cpu_ptr) cpu_ptr->NMI_pending = false;
-                    break;
-                case 0x04:  // 0x7004 = Stars enable
-                    regs.star_enable = b0;
-                    break;
-                case 0x06:  // 0x7006 = Flip screen X (mirror 0x07f8)
-                    regs.flip_screen_x = b0;
-                    break;
-                case 0x07:  // 0x7007 = Flip screen Y (mirror 0x07f8)
-                    regs.flip_screen_y = b0;
-                    break;
-                default:
-                    break;
+        switch (addr & 0x7800) {                                  // 4 régions hardware
+        case 0x6000:                                             // /DRIVER 6000-67FF (§3.2 MAME)
+            switch (off) {
+                case 0x01: break;                                 // 6001 = 2P START LAMP (ignoré)
+                case 0x02: regs.coin_lock = b0; break;            // 6002 = Coin lockout
+                case 0x03: break;                                 // 6003 = Coin counter (ignoré)
+                case 0x04: audio_synth.write_dac(0, b0); break;   // 6004 = DAC bit 0 (1MΩ)
+                case 0x05: audio_synth.write_dac(1, b0); break;   // 6005 = DAC bit 1 (470kΩ)
+                case 0x06: audio_synth.write_dac(2, b0); break;   // 6006 = DAC bit 2 (220kΩ)
+                case 0x07: audio_synth.write_dac(3, b0); break;   // 6007 = DAC bit 3 (100kΩ)
+                default: break;
             }
-        } else {
-            // === Régions /DRIVER (0x6000-0x67FF) === MAME galaxian.cpp
-            switch (port_low) {
-                case 0x01:  // 0x6001 = 2P START LAMP (ignoré sur hardware)
-                    break;
-                case 0x02:  // 0x6002 = Coin lockout
-                    regs.coin_lock = b0;
-                    break;
-                case 0x03:  // 0x6003 = Coin counter (ignoré)
-                    break;
-                case 0x04:  // 0x6004 = DAC bit 0 (1MΩ) → VCO fond sonore
-                    audio_synth.write_dac(0, b0); break;
-                case 0x05:  // 0x6005 = DAC bit 1 (470kΩ) → VCO fond sonore
-                    audio_synth.write_dac(1, b0); break;
-                case 0x06:  // 0x6006 = DAC bit 2 (220kΩ) → VCO fond sonore
-                    audio_synth.write_dac(2, b0); break;
-                case 0x07:  // 0x6007 = DAC bit 3 (résistance 100kΩ) → VCO fond sonore (§3.2 MAME)
-                    audio_synth.write_dac(3, b0);
-                    break;
-                default:
-                    break;
-            }
-        }
-
-        // Ports sonores (0x6800-0x6807) — MAME galaxian.cpp §3.3
-        // 6800=FS1, 6801=FS2, 6802=FS3, 6803=HIT, 6804=n/c, 6805=FIRE, 6806=VOL1, 6807=VOL2
-        if (addr >= 0x6800 && addr < 0x6808) {
+            break;
+        case 0x6800:                                             // /SOUND 6800-6FFF (§3.3 MAME)
             audio_synth.write_control(addr, val);
-            uint8_t reg = addr & 0x07;
-            if (reg == 3)       audio_synth.trigger_hit();   // HIT
-            else if (reg == 5)  audio_synth.trigger_fire();  // FIRE (6804=n/c ignoré)
-        }
-
-        // Registre PITCH (0x7800) — latch 8 bits complet, modulation VCO (§3.4/§6.5 MAME)
-        if ((addr & 0x07FF) == 0x7800) {
+            if (off == 0x03)      audio_synth.trigger_hit();      // 6803 = HIT
+            else if (off == 0x05) audio_synth.trigger_fire();     // 6805 = FIRE
+            break;
+        case 0x7000:                                             // /LATCH 7000-77FF (§3.4 MAME)
+            switch (off) {
+                case 0x01:                                         // 7001 = NMI ON/OFF
+                    regs.irq_enabled = b0;
+                    if (!b0 && cpu_ptr) cpu_ptr->NMI_pending = false;  // CLEAR_LINE §4
+                    break;
+                case 0x04: regs.star_enable   = b0; break;          // 7004 = STARS ON
+                case 0x06: regs.flip_screen_x = b0; break;          // 7006 = HFLIP
+                case 0x07: regs.flip_screen_y = b0; break;          // 7007 = VFLIP
+                default: break;
+            }
+            break;
+        case 0x7800:                                             // /PITCH 7800-7FFF (§3.4 MAME)
             audio_synth.write_pitch(val);
-            // reset_watchdog(); // ❌ Supprimé — seul le read de 0x7800 réarme (§8.1 MAME)
+            break;
         }
-
     }
 
 public:
