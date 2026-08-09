@@ -36,6 +36,7 @@ uint8_t  GalaxianEmulator::cb_mem_read (uint16_t addr) {
     // Watchdog : réarmer le compteur quand on lit 0x7800
     if (addr >= 0x7800 && addr < 0x8000) {
         g_bus_ptr->reset_watchdog();
+        if (g_emu_ptr) g_emu_ptr->boot_chk.mark(4);      // watchdog nourri
     }
     
     if (g_emu_ptr) g_emu_ptr->log_memory_access(addr, val, "R");
@@ -43,7 +44,16 @@ uint8_t  GalaxianEmulator::cb_mem_read (uint16_t addr) {
 }
 void     GalaxianEmulator::cb_mem_write(uint16_t addr, uint8_t val) {
         g_bus_ptr->write(addr, val);
-        if (g_emu_ptr) g_emu_ptr->log_memory_access(addr, val, "W");
+        if (g_emu_ptr) {
+            g_emu_ptr->log_memory_access(addr, val, "W");
+            BootChecker& bc = g_emu_ptr->boot_chk;
+            if      (addr >= 0x5000 && addr < 0x5800) bc.mark(2);                    // VRAM
+            else if (addr >= 0x5800 && addr < 0x6000) bc.mark(3);                    // OBJRAM
+            if ((addr & 0x7800) == 0x7000) {
+                if ((addr & 0x07FF) == 0x0001 && (val & 1)) bc.mark(6);              // NMI ON
+                if ((addr & 0x07FF) == 0x0004 && (val & 1)) bc.mark(8);              // STARS ON
+            }
+        }
     }
 uint8_t  GalaxianEmulator::cb_io_read  (uint16_t port) { return g_bus_ptr->io_read(port); }
 void     GalaxianEmulator::cb_io_write (uint16_t port, uint8_t val) {
@@ -52,6 +62,8 @@ void     GalaxianEmulator::cb_io_write (uint16_t port, uint8_t val) {
     if (g_emu_ptr) {
         uint16_t addr = 0x6000 | (port & 0xFF);
         g_emu_ptr->log_hw_reg_access(addr, val, "IO");
+        // Marquer NMI ON si écriture sur 0x6001 bit0=1 (mirror de 0x7001)
+        if ((addr & 0x07FF) == 0x0001 && (val & 1)) g_emu_ptr->boot_chk.mark(6);
     }
     g_bus_ptr->io_write(port, val);
 }
@@ -360,6 +372,7 @@ void GalaxianEmulator::reset() {
     trace_log.clear();
     boot_trace_done = false;
     boot_finished = false;
+    boot_dump_done = false;
     memory_access_count = 0;
     g_opcode_trace_enabled = true;
     g_opcode_trace_count = 0;
@@ -373,22 +386,23 @@ void GalaxianEmulator::reset() {
     dbg_frame_count     = 0;
     dbg_prev_vcounter   = -1;
 
-    // Reset du compteur vidéo
+    // Validation RAM/VRAM — canari pour détecter régression miroir avant boot Z80
+    static bool ram_tested = false;
+    if (!ram_tested) { validate_ram(); ram_tested = true; }
+
+    // Lignes d'état : une seule fois (premier reset), pas à chaque reset loop
+    if (boot_chk.resets == 0) {
+        LOG_INFO("[RESET] PC=%04X SP=%04X IFF1=%d IM=%d I=%02X\n",
+            cpu.PC, cpu.SP, cpu.IFF1 ? 1 : 0, cpu.IM, cpu.I);
+        uint8_t in0 = bus.build_in0();
+        LOG_INFO("[PORTS-IN] IN0=%02X IN1=%02X IN2=%02X | TEST=%s SERVICE=%s\n",
+            in0, bus.build_in1(), bus.build_in2(),
+            (in0 & 0x40) ? "RELACHE (normal)" : "ENFONCE(!!!)",
+            (in0 & 0x80) ? "RELACHE (normal)" : "PRESSE(!!!)");
+    }
+
     bus.video_cnt.reset_frame();
-
-    LOG_INFO("[RESET] PC=%04X SP=%04X IFF1=%d IM=%d I=%02X\n",
-        cpu.PC, cpu.SP, cpu.IFF1 ? 1 : 0, cpu.IM, cpu.I);
-
-    // Diagnostic ports IN — vérifie décodage et polarité TEST/SERVICE
-    uint8_t in0 = bus.build_in0();
-    LOG_INFO("[PORTS-IN] IN0=%02X IN1=%02X IN2=%02X | TEST=%s SERVICE=%s\n",
-        in0, bus.build_in1(), bus.build_in2(),
-        (in0 & 0x40) ? "OFF" : "ON(!!!)",
-        (in0 & 0x80) ? "RELACHE" : "PRESSE(!!!)");
-
-    // Log initial de l'état CPU
-    log_cpu_state_moment("RESET", 0);
-
+    boot_chk.mark(1);  // CPU reset (PC=0000)
 }
 
 // ============================================================================
@@ -658,25 +672,9 @@ void GalaxianEmulator::run_frame() {
         // ------------------------------------------------------------------
         uint32_t t = z80_step(&cpu);
 
-        // Diagnostic : logger les instructions autour de 0x1A65 (boucle suspecte)
-        if (cpu.PC >= 0x1A60 && cpu.PC <= 0x1A70) {
-            static int wait_loop_count = 0;
-            static uint16_t last_pc_diagnostic = 0xFFFF;
-            if (last_pc_diagnostic != cpu.PC) {
-                wait_loop_count = 0;
-                last_pc_diagnostic = cpu.PC;
-            }
-            wait_loop_count++;
-            // Logger les 30 passages maximum pour ne pas surcharger la sortie
-            if (wait_loop_count <= 30) {
-                uint8_t op = bus.read(cpu.PC);
-                printf("[WAIT-LOOP] #%d PC=%04X OP=%02X AF=%04X BC=%04X DE=%04X HL=%04X SP=%04X IFF1=%d NMI_pend=%d\n",
-                       wait_loop_count, cpu.PC, op, cpu.AF, cpu.BC, cpu.DE, cpu.HL, cpu.SP,
-                       cpu.IFF1 ? 1 : 0, cpu.NMI_pending ? 1 : 0);
-            } else if (wait_loop_count == 31) {
-                printf("[WAIT-LOOP] ... (suite masquée après 30 passages)\n");
-            }
-        }
+        // --- BootChecker : IM2 configuré + première NMI prise ---
+        if (cpu.IM == 2 && cpu.I != 0)  boot_chk.mark(5);
+        if (cpu.PC == 0x0066)           boot_chk.mark(7);
 
         cpu.total_cycles += static_cast<int>(t);
         cycles_done     += static_cast<int>(t);
@@ -702,12 +700,27 @@ void GalaxianEmulator::run_frame() {
         }
     } // end of while loop
 
-    // Vérifier le watchdog une fois par frame (après la boucle de cycles complète)
+    // --- Watchdog : silencieux, verdict via BootChecker ---
     bus.tick_watchdog();
     if (bus.watchdog_timed_out()) {
-        printf("[WATCHDOG] Timeout — reset CPU\n");
+        boot_chk.note_watchdog_reset();
+        bus.regs.watchdog_vblanks = 0;   // réarme, évite le double reset
         reset();
         return;
+    }
+
+    boot_chk.tick_frame();               // ← timeout global 30 frames
+
+    // Dump du ring buffer au premier verdict (boucle bloquante diagnostiquée)
+    if (boot_chk.verdict && !boot_dump_done) {
+        boot_dump_done = true;
+        printf("[BOOT] ETAT AU BLOCAGE : PC=%04X SP=%04X AF=%04X BC=%04X DE=%04X HL=%04X I=%02X IM=%d\n",
+               cpu.PC, cpu.SP, cpu.AF, cpu.BC, cpu.DE, cpu.HL, cpu.I, cpu.IM);
+        printf("[BOOT] Boucle suspecte (24 dernieres instructions) :\n");
+        for (int k = 0; k < 24; k++) {
+            int idx = (ring_idx - 24 + k + 64) & 63;
+            printf("        PC=%04X OP=%02X\n", ring_pc[idx], ring_op[idx]);
+        }
     }
 
     // Incrémenter le compteur de frames.
@@ -1015,7 +1028,7 @@ void GalaxianEmulator::render_bullets() {
 void GalaxianEmulator::log_memory_access(uint16_t addr, uint8_t val, const char* type) {
 #ifdef LOG_MEMORY_ACCESS
     if (!LOG_MEMORY_ACCESS || !fp_memory_access) return;
-    if (memory_access_count >= 10000) return; // Limite pour éviter saturation
+    if (memory_access_count >= 200000) return; // Limite pour éviter saturation
     fprintf(fp_memory_access, "[CYC %07d] %c ADDR=%04X VAL=%02X\n", cpu.total_cycles, *type, addr, val);
     memory_access_count++;
 #endif

@@ -1,6 +1,7 @@
 #pragma once
 #include "cpu/z80.h"        // Z80 Farquaad56
 #include "galaxian_bus.h"
+#include "boot_checker.h"
 #include <vector>
 #include <cstdint>
 #include <cstdio>
@@ -22,9 +23,9 @@ struct CycleTrace {
 // ============================================================================
 // NOTE: Tous les logs désactivés car le boot est stable et l'émulation fonctionne.
 //       Réactiver temporairement pour debug en changeant 0 → 1.
-#define LOG_BOOT_TRACE      0   // boot_opcode_trace.log    : 512 premiers opcodes au boot
-#define LOG_IRQ_EVENTS      0   // irq_events.log           : trigger/ack VBLANK (INT correction)
-#define LOG_HW_REG_ACCESS   0   // hw_reg_access.log        : écritures hardware 0x6000-0x7FFF
+#define LOG_BOOT_TRACE      1   // boot_opcode_trace.log    : 512 premiers opcodes au boot
+#define LOG_IRQ_EVENTS      1   // irq_events.log           : trigger/ack VBLANK (INT correction)
+#define LOG_HW_REG_ACCESS   1   // hw_reg_access.log        : écritures hardware 0x6000-0x7FFF
 #define LOG_VRAM_SNAPSHOTS  0   // vram_snapshots.log       : VRAM/CRAM toutes les 60 frames
 #define LOG_CPU_STATE       0   // cpu_state_keymoments.log : registres CPU aux moments clés
 #define LOG_SPRITES         0   // sprites_log.log          : position sprites toutes les 60 frames
@@ -40,6 +41,7 @@ class GalaxianEmulator {
 public:
     GalaxianBus  bus;
     Z80          cpu;
+    BootChecker  boot_chk;
 
     // ROM graphique et palette (indépendantes du bus Z80)
     uint8_t  gfx_rom[0x1000]      = {};   // 1h.bin + 1k.bin (4KB total)
@@ -61,6 +63,7 @@ public:
 
     // Boot sequence tracking
     bool     boot_finished    = false;       // true quand le boot a terminé (PC sort de zone POST)
+    bool     boot_dump_done   = false;       // true après premier dump du ring buffer au verdict
 
     // Debug counters (membre pour permettre reset propre)
     uint8_t  dbg_last_i_seen     = 0xFF;

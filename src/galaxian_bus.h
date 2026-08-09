@@ -59,7 +59,7 @@ struct HardwareRegs {
     bool flip_screen_y     = false; // 0x7007 — Flip screen Y (mirror 0x07f8)
     bool star_enable       = false; // 0x7004 bit0
     uint8_t sound_ctrl     = 0;     // 0x6004/0x6005 (ports son)
-    
+
     // Watchdog — MAME : set_vblank_count("screen", 8) → reset si pas de lecture 0x7800 pendant 8 VBLANK (~132ms)
     int     watchdog_vblanks   = 0; // compteur de VBLANK depuis dernier réarmement
     static constexpr int WATCHDOG_MAX_VBLANKS = 8;
@@ -111,16 +111,14 @@ public:
         if (addr < 0x4800) return ram[(addr - 0x4000) & 0x03FF];
         // 0x4800-0x4FFF : NON CONNECTÉ sur la borne d'origine (§3.1) — bus flottant = 0xFF
         if (addr < 0x5000) return 0xFF;
-        if (addr < 0x5400) return vram[addr & 0x03FF];       // VRAM (1KB, 0x5000-0x53FF)
-        // Miroir 0x0400 : 0x5400-0x57FF mappe sur VRAM (§3.1/§3.5 MAME)
-        if (addr < 0x5800) return vram[addr & 0x03FF];
-        // OBJRAM 256 octets (0x5800-0x58FF) + miroir (0x5900-0x5FFF, MAME mirror(0x0700))
+        if (addr < 0x5400) return vram[addr & 0x03FF];        // VRAM
+        if (addr < 0x5800) return vram[addr & 0x03FF];        // ✅ miroir 0x0400 (§3.5)
         if (addr < 0x6000) return spram[(addr - 0x5800) & 0xFF];
         if (addr < 0x6800) return build_in0();       // 0x6000-0x67FF
         if (addr < 0x7000) return build_in1();       // 0x6800-0x6FFF
         if (addr < 0x7800) return build_in2();       // 0x7000-0x77FF
 
-        // Lecture 0x7800 réarme le watchdog (MAME : watchdog_timer_device::reset_r)
+        // Lecture 0x7800 : le reset_watchdog() est effectué via cb_mem_read().
         return 0xFF;
     }
 
@@ -137,10 +135,8 @@ public:
         }
         // 0x4800-0x4FFF : non connecté (§3.1 MAME) — ignorer l'écriture
         if (addr < 0x5000) return;
-        if (addr < 0x5400) { vram[addr & 0x03FF] = val; return; }   // VRAM (0x5000-0x53FF)
-        // Miroir 0x0400 : 0x5400-0x57FF mappe sur VRAM (§3.1/§3.5 MAME)
-        if (addr < 0x5800) { vram[addr & 0x03FF] = val; return; }
-        // OBJRAM — Écriture mémoire-synchro (0x5800-0x5FFF, mirror 0x0700 → 256 octets)
+        if (addr < 0x5400) { vram[addr & 0x03FF] = val; return; }
+        if (addr < 0x5800) { vram[addr & 0x03FF] = val; return; }  // ✅ miroir R/W
         if (addr < 0x6000) { spram[(addr - 0x5800) & 0xFF] = val; return; }   // OBJRAM/SPRAM writable
 
         write_hw_reg(addr, val);
@@ -153,7 +149,7 @@ public:
         // Le Z80 envoie un port 8 bits (n) dans IN A,(n) / OUT (n),A
         // Reconstruire l'adresse mémoire complète : base 0x6000 + port bas
         uint16_t addr = 0x6000 | (port & 0xFF);
-        
+
         if (addr < 0x6800) return build_in0();       // 0x6000-0x67FF
         if (addr < 0x7000) return build_in1();       // 0x6800-0x6FFF
         if (addr < 0x7800) return build_in2();       // 0x7000-0x77FF
@@ -186,11 +182,11 @@ public:
         if (input.fire)    v |= (1 << 4);
         // Bit 5 = DIP Cabinet (0=Upright, 1=Cocktail) — valeur brute du switch
         if (input.dipsw_cabinet) v |= (1 << 5);
-        // Bit 6 = TEST (IP_ACTIVE_HIGH)
-        if (input.test_switch)   v |= (1 << 6);
-        // Bit 7 = SERVICE (IP_ACTIVE_HIGH)
-        if (input.service)       v |= (1 << 7);
-        return v;
+        // Bit 6 = TEST (IP_ACTIVE_LOW — MAME galaxian.cpp) → idle HIGH (=bit actif quand relâché)
+        if (!input.test_switch)  v |= (1 << 6);
+        // Bit 7 = SERVICE (IP_ACTIVE_LOW — MAME galaxian.cpp) → idle HIGH (=bit actif quand relâché)
+        if (!input.service)      v |= (1 << 7);
+        return v;                                // IN0 idle = 0xC0
     }
 
     // ------------------------------------------------------------------------
@@ -227,7 +223,7 @@ public:
 
     VideoCounter   video_cnt;
     GalaxianAudioSynth audio_synth;  // Synthétiseur audio discret
-    
+
     const VideoCounter& video_counter() const { return video_cnt; }
 
     // ------------------------------------------------------------------------
@@ -248,7 +244,7 @@ public:
             switch (port_low) {
                 case 0x01:  // 0x7001 = NMI ON/OFF (flip-flop D, actif HIGH) — MAME galaxian.cpp irq_enable_w
                     regs.irq_enabled = b0;
-                    // NMI ON = 0 force la ligne à CLEAR (§4 MAME)
+                    // CLEAR_LINE §4 : écriture 0x7001=0 force la ligne NMI à CLEAR
                     if (!b0 && cpu_ptr) cpu_ptr->NMI_pending = false;
                     break;
                 case 0x04:  // 0x7004 = Stars enable
@@ -299,7 +295,9 @@ public:
         // Registre PITCH (0x7800) — latch 8 bits complet, modulation VCO (§3.4/§6.5 MAME)
         if ((addr & 0x07FF) == 0x7800) {
             audio_synth.write_pitch(val);
+            // reset_watchdog(); // ❌ Supprimé — seul le read de 0x7800 réarme (§8.1 MAME)
         }
+
     }
 
 public:
@@ -307,7 +305,7 @@ public:
     void render_audio(float* buffer, int num_samples) {
         audio_synth.render_samples(buffer, num_samples);
     }
-    
+
     // Met à jour le LFSR audio après le rendu vidéo
     void update_audio_lfsr(uint32_t lfsr) {
         audio_synth.update_lfsr(lfsr);
@@ -344,9 +342,7 @@ public:
     // Appelée à chaque front montant VBLANK (une fois par frame)
     void tick_watchdog() {
         regs.watchdog_vblanks++;
-        if (regs.watchdog_vblanks >= HardwareRegs::WATCHDOG_MAX_VBLANKS) {
-            printf("[WATCHDOG] Timeout — reset CPU (%d VBLANKs sans lecture 0x7800)\n", regs.watchdog_vblanks);
-        }
+        // BootChecker s'en charge (pas de printf ici)
     }
 
     bool watchdog_timed_out() const {
