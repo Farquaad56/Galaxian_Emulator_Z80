@@ -166,7 +166,7 @@ public:
 public:
     // ------------------------------------------------------------------------
     // build_in0 — Port IN0 (0x6000) : Coin1, Coin2, Joystick P1, DIP cabinet, TEST, SERVICE
-    // MAME galaxian.cpp : tous les bits sont IP_ACTIVE_HIGH → base 0x00, on positionne le bit quand actif.
+    // MAME galaxian.cpp : bits 0-5 IP_ACTIVE_HIGH, bits 6(TEST)/7(SERVICE) IP_ACTIVE_LOW.
     // ========================================================================
     uint8_t build_in0() const {
         uint8_t v = 0x00;
@@ -182,11 +182,11 @@ public:
         if (input.fire)    v |= (1 << 4);
         // Bit 5 = DIP Cabinet (0=Upright, 1=Cocktail) — valeur brute du switch
         if (input.dipsw_cabinet) v |= (1 << 5);
-        // Bit 6 = TEST (IP_ACTIVE_HIGH — MAME galaxian.cpp) → 1 SEULEMENT si enfoncé
-        if (input.test_switch)   v |= (1 << 6);
-        // Bit 7 = SERVICE (IP_ACTIVE_HIGH — MAME galaxian.cpp) → 1 SEULEMENT si enfoncé
-        if (input.service)       v |= (1 << 7);
-        return v;                                // IN0 idle = 0x00
+        // Bit 6 = TEST (IP_ACTIVE_LOW : 1 au repos, 0 si enfoncé)
+        if (!input.test_switch) v |= (1 << 6);
+        // Bit 7 = SERVICE (IP_ACTIVE_LOW : 1 au repos, 0 si enfoncé)
+        if (!input.service)     v |= (1 << 7);
+        return v;                                // IN0 idle = 0xC0
     }
 
     // ------------------------------------------------------------------------

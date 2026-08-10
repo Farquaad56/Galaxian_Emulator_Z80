@@ -46,7 +46,6 @@ void     GalaxianEmulator::cb_mem_write(uint16_t addr, uint8_t val) {
         g_bus_ptr->write(addr, val);
         if (g_emu_ptr) {
             g_emu_ptr->log_memory_access(addr, val, "W");
-            // Logger aussi les accès registre hardware (complète hw_reg_access.log)
             g_emu_ptr->log_hw_reg_access(addr, val, "WRITE");
             BootChecker& bc = g_emu_ptr->boot_chk;
             if      (addr >= 0x5000 && addr < 0x5800) bc.mark(2);                    // VRAM
@@ -214,21 +213,58 @@ void GalaxianEmulator::log_irq_event(const char* event, int cycles) {
 void GalaxianEmulator::log_hw_reg_access(uint16_t addr, uint8_t val, const char* type_str) {
 #ifdef LOG_HW_REG_ACCESS
     if (!LOG_HW_REG_ACCESS || !fp_hw_reg_access) return;
+
+    // Filtrer : ne logger que les registres hardware 0x6000-0x7FFF
+    if (addr < 0x6000 || addr >= 0x8000) return;
+
     fprintf(fp_hw_reg_access, "[CYC %07d] ADDR=%04X VAL=%02X TYPE=%s", cpu.total_cycles, addr, val, type_str);
-    // Masque correct selon MAME : 0x07FF (miroir sur bits hauts)
-    uint16_t masked = addr & 0x07FF;
-    if (masked == 0x7001) {
-        fprintf(fp_hw_reg_access, " %s", (val & 1) ? "IRQ_ENABLE_WRITE=1" : "IRQ_ENABLE_WRITE=0");
-    } else if (masked == 0x7006) {
-        fprintf(fp_hw_reg_access, " FLIP_SCREEN_X=%d", val & 1);
-    } else if (masked == 0x7007) {
-        fprintf(fp_hw_reg_access, " FLIP_SCREEN_Y=%d", val & 1);
-    } else if (masked == 0x7004) {
-        fprintf(fp_hw_reg_access, " STAR_ENABLE=%d", val & 1);
-    } else if (masked == 0x6004 || masked == 0x6005) {
-        fprintf(fp_hw_reg_access, " SOUND_CTRL=%02X", val);
-    } else {
-        fprintf(fp_hw_reg_access, " UNKNOWN");
+
+    // Décodage par région (pas de masque — comparer l'adresse complète)
+    switch (addr & 0x7800) {  // 4 régions hardware
+        case 0x6000:  // /DRIVER 6000-67FF
+            switch (addr & 0x07) {
+                case 0x01: fprintf(fp_hw_reg_access, " 2P_START_LAMP"); break;
+                case 0x02: fprintf(fp_hw_reg_access, " COIN_LOCKOUT=%d", val & 1); break;
+                case 0x03: fprintf(fp_hw_reg_access, " COIN_COUNTER"); break;
+                case 0x04: fprintf(fp_hw_reg_access, " DAC_BIT0=%d", val & 1); break;
+                case 0x05: fprintf(fp_hw_reg_access, " DAC_BIT1=%d", val & 1); break;
+                case 0x06: fprintf(fp_hw_reg_access, " DAC_BIT2=%d", val & 1); break;
+                case 0x07: fprintf(fp_hw_reg_access, " DAC_BIT3=%d", val & 1); break;
+                default: fprintf(fp_hw_reg_access, " DRIVER_UNKNOWN"); break;
+            }
+            break;
+
+        case 0x6800:  // /SOUND 6800-6FFF
+            switch (addr & 0x07) {
+                case 0x00: fprintf(fp_hw_reg_access, " FS1=%d", val & 1); break;
+                case 0x01: fprintf(fp_hw_reg_access, " FS2=%d", val & 1); break;
+                case 0x02: fprintf(fp_hw_reg_access, " FS3=%d", val & 1); break;
+                case 0x03: fprintf(fp_hw_reg_access, " HIT=%d", val & 1); break;
+                case 0x04: fprintf(fp_hw_reg_access, " NC"); break;
+                case 0x05: fprintf(fp_hw_reg_access, " FIRE=%d", val & 1); break;
+                case 0x06: fprintf(fp_hw_reg_access, " VOL1=%d", val & 1); break;
+                case 0x07: fprintf(fp_hw_reg_access, " VOL2=%d", val & 1); break;
+                default: fprintf(fp_hw_reg_access, " SOUND_UNKNOWN"); break;
+            }
+            break;
+
+        case 0x7000:  // /LATCH 7000-77FF
+            switch (addr & 0x07) {
+                case 0x01: fprintf(fp_hw_reg_access, " %s", (val & 1) ? "IRQ_ENABLE_WRITE=1" : "IRQ_ENABLE_WRITE=0"); break;
+                case 0x04: fprintf(fp_hw_reg_access, " STAR_ENABLE=%d", val & 1); break;
+                case 0x06: fprintf(fp_hw_reg_access, " FLIP_SCREEN_X=%d", val & 1); break;
+                case 0x07: fprintf(fp_hw_reg_access, " FLIP_SCREEN_Y=%d", val & 1); break;
+                default: fprintf(fp_hw_reg_access, " LATCH_UNKNOWN"); break;
+            }
+            break;
+
+        case 0x7800:  // /PITCH 7800-7FFF
+            fprintf(fp_hw_reg_access, " PITCH=%02X", val);
+            break;
+
+        default:
+            fprintf(fp_hw_reg_access, " UNKNOWN_REGION");
+            break;
     }
     fprintf(fp_hw_reg_access, "\n");
 #endif
@@ -707,8 +743,7 @@ void GalaxianEmulator::run_frame() {
     if (bus.watchdog_timed_out()) {
         boot_chk.note_watchdog_reset();
         bus.regs.watchdog_vblanks = 0;   // r??arme, ??vite le double reset
-        // TEMPORAIRE : d??sactiv?? le reset pour diagnostiquer un POST long
-        // reset();
+        reset();
         return;
     }
 
@@ -859,7 +894,7 @@ void GalaxianEmulator::render_tilemap() {
                     if (fH) rx = 255 - rx;
                     if (fV) ry = FB_H - 1 - ry;
 
-                    if (ry >= FB_H) continue;   // visible V = 224
+                    if (ry >= 224) continue;    // visible V = 224 (pas 256)
 
                     // ×3 sur l'axe H brut pour sous-pixels de tuile
                     int x3 = rx * 3;
@@ -929,8 +964,8 @@ void GalaxianEmulator::render_sprites() {
                     int fx = rx * 3;                        // axe H brut en sous-pixels
                     int fy = ry;                            // axe V brut
 
-                    if (fx < 0 || fx >= FB_W) continue;
-                    if (fy < 0 || fy >= FB_H) continue;
+                    if (fx < 0 || fx >= 224 * 3) continue;  // visible H = 672
+                    if (fy < 0 || fy >= 224) continue;      // visible V = 224
 
                     // Clipping hardware 17px sur l'axe H brut (§5.2 MAME)
                     if (!gflip_x) {
@@ -964,7 +999,7 @@ void GalaxianEmulator::render_bullets() {
         uint8_t sy_raw = bus.spram[base + 0];
         int fy = 255 - static_cast<int>(sy_raw);   // axe V brut (raw_y invers?? CRT)
 
-        if (fy < 0 || fy >= FB_H) continue;
+        if (fy < 0 || fy >= 224) continue;      // visible V = 224
 
         // ??5.3 : x -= 4 pour alignement line buffer
         int fx_base = (static_cast<int>(bus.spram[base + 3]) - 4) * 3;   // axe H brut ×3
@@ -975,7 +1010,7 @@ void GalaxianEmulator::render_bullets() {
         for (int dx = 0; dx < 12; dx++) {
             int fx = fx_base + dx * 3;
             if (fx < xmin_b || fx > xmax_b) continue;
-            if (fx < 0 || fx >= FB_W) continue;
+            if (fx < 0 || fx >= 224 * 3) continue;  // visible H = 672
             framebuffer[fy * FB_W + fx] =
             framebuffer[fy * FB_W + fx + 1] =
             framebuffer[fy * FB_W + fx + 2] = white;
@@ -988,7 +1023,7 @@ void GalaxianEmulator::render_bullets() {
         uint8_t sy_raw = bus.spram[base + 0];
         int fy = 255 - static_cast<int>(sy_raw);
 
-        if (fy < 0 || fy >= FB_H) return;
+        if (fy < 0 || fy >= 224) return;       // visible V = 224
 
         int fx_base = (static_cast<int>(bus.spram[base + 3]) - 4) * 3;   // axe H brut ×3
         if (fx_base < xmin_b || fx_base > xmax_b) return;
@@ -998,7 +1033,7 @@ void GalaxianEmulator::render_bullets() {
         for (int dx = 0; dx < 12; dx++) {
             int fx = fx_base + dx * 3;
             if (fx < xmin_b || fx > xmax_b) continue;
-            if (fx < 0 || fx >= FB_W) continue;
+            if (fx < 0 || fx >= 224 * 3) continue;  // visible H = 672
             framebuffer[fy * FB_W + fx] =
             framebuffer[fy * FB_W + fx + 1] =
             framebuffer[fy * FB_W + fx + 2] = yellow;

@@ -48,7 +48,7 @@ struct BootChecker {
     void note_watchdog_reset() {
         resets++;
         if (resets == 1) {
-            printf("[BOOT] !!  Reset watchdog n°1 (7800 jamais lu)\n");
+            // reset watchdog n°1 — silencieux pour ne pas polluer la console
         } else if (!verdict) {
             fail("reset loop watchdog");
         }
@@ -56,15 +56,7 @@ struct BootChecker {
 
     void fail(const char* reason) {
         verdict = true;
-        printf("[BOOT] ==== ECHEC BOOT (%s) ====\n", reason);
-        printf("[BOOT] Etapes :");
-        for (int i = 1; i <= NB; i++) printf(" %d:%s", i, reached[i] ? "OK" : "--");
-        printf("\n");
-        for (int i = 1; i <= NB; i++) {
-            if (!reached[i]) {
-                printf("[BOOT] -> CPU bloque AVANT l'etape %d : %s\n", i, name(i));
-                break;
-            }
-        }
+        // échec boot — silencieux (debug via logs fichiers si besoin)
+        (void)reason;
     }
 };
