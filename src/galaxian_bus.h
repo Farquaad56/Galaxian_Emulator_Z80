@@ -258,9 +258,9 @@ public:
             break;
         case 0x7000:                                             // /LATCH 7000-77FF (§3.4 MAME)
             switch (off) {
-                case 0x01:                                         // 7001 = NMI ON/OFF
+                case 0x01:                                         // 7001 = IRQ ON/OFF (maskable INT, pas NMI physique)
                     regs.irq_enabled = b0;
-                    if (!b0 && cpu_ptr) cpu_ptr->NMI_pending = false;  // CLEAR_LINE §4
+                    if (!b0 && cpu_ptr) cpu_ptr->INT_line = false;   // CLEAR_LINE — clears pending IRQ
                     break;
                 case 0x04: regs.star_enable   = b0; break;          // 7004 = STARS ON
                 case 0x06: regs.flip_screen_x = b0; break;          // 7006 = HFLIP

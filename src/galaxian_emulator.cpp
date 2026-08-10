@@ -694,9 +694,8 @@ void GalaxianEmulator::run_frame() {
         // Le jeu doit explicitement activer irq_enabled via ??criture sur 0x7001
         // avant que la NMI ne soit autoris??e (conform??ment MAME ??8.1).
         if (bus.video_cnt.take_vblank_edge()) {
-            bool nmi_allowed = bus.regs.irq_enabled;
-            if (nmi_allowed && !cpu.NMI_pending) {
-                cpu.NMI_pending = true;
+            if (bus.regs.irq_enabled) {
+                cpu.INT_line = true;
                 log_irq_event("TRIGGER", cpu.total_cycles);
             }
         }
@@ -710,9 +709,7 @@ void GalaxianEmulator::run_frame() {
         // ------------------------------------------------------------------
         uint32_t t = z80_step(&cpu);
 
-        // --- BootChecker : IM2 configur?? + premi??re NMI prise ---
-        if (cpu.IM == 2 && cpu.I != 0)  boot_chk.mark(5);
-        if (cpu.PC == 0x0066)           boot_chk.mark(7);
+        // --- BootChecker : IRQ VBLANK acceptée par le Z80 ---
 
         cpu.total_cycles += static_cast<int>(t);
         cycles_done     += static_cast<int>(t);

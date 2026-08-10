@@ -134,10 +134,10 @@ void DebugUI::draw_debug_panel(GalaxianEmulator& emu) {
     ImGui::Text("VBLANK: %s", vc.vblank_active ? "ACTIF" : "inactif");
     ImGui::PopStyleColor();
 
-    // --- Force NMI VBLANK button ---
-    if (ImGui::Button("Force NMI VBLANK", {160, 28})) {
+    // --- Trigger IRQ VBLANK button ---
+    if (ImGui::Button("Trigger IRQ VBLANK", {160, 28})) {
         emu.bus.video_cnt.vblank_edge = true;
-        emu.cpu.NMI_pending = true;
+        emu.cpu.INT_line = true;
     }
 
     ImGui::SeparatorText("Trace");
