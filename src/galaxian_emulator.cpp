@@ -308,7 +308,10 @@ void GalaxianEmulator::log_sprites_snapshot(int frame) {
         uint8_t code = bus.spram[y_off + 1];
         uint8_t attr = bus.spram[y_off + 2];
         uint8_t sx   = bus.spram[y_off + 3];
-        int screen_y = 255 - sy; // M??me formule que render_sprites()
+        // Correction MAME : les 3 premiers sprites (0-2) ont un décalage ±1
+        // sy = 240 - (base0 - correction), correction=1 pour sprites 0,1,2
+        int sy_correction = (i < 3) ? 1 : 0;
+        int screen_y = 255 - sy + sy_correction; // M??me formule que render_sprites()
         int screen_x = sx + 1;   // Align?? sur le rendu render_sprites()
         bool flip_x  = (attr & 0x01) != 0;
         bool flip_y  = (attr & 0x02) != 0;
@@ -927,6 +930,10 @@ void GalaxianEmulator::render_sprites() {
         int sy_raw = static_cast<int>(s[0]);   // raw Y → axe H brut (vertical physique)
         int sx     = static_cast<int>(s[3]) + 1; // raw X → axe V brut (horizontal physique)
 
+        // Correction MAME : les 3 premiers sprites (0-2) ont un décalage ±1
+        // sy = 240 - (base0 - correction), correction=1 pour sprites 0,1,2
+        int sy_correction = (i < 3) ? 1 : 0;
+
         // Tile index (6 bits, bits 5:0 du byte 1)
         uint8_t tile_idx = s[1] & 0x3F;
 
@@ -959,7 +966,8 @@ void GalaxianEmulator::render_sprites() {
                     int draw_px = sflipY ? (7 - px) : px;   // flip sur axe V brut
 
                     // Position brute : axe H brut (rx, ×3), axe V brut (ry)
-                    int rx = sy_raw + oy + draw_py;         // axe H brut (vertical physique)
+                    // Formule MAME : sy = 240 - (base0 - correction), correction=1 pour sprites 0-2
+                    int rx = sy_raw - sy_correction + oy + draw_py;  // axe H brut (vertical physique) avec correction
                     int ry = sx + ox + draw_px;             // axe V brut (horizontal physique)
 
                     if (gflip_x) rx = 255 - rx;            // HFLIP → miroir axe H brut
