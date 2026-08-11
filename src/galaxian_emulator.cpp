@@ -627,6 +627,7 @@ void GalaxianEmulator::run_frame() {
     // Les lignes d'interruption doivent ??tre basses en d??but de frame
     cpu.INT_line = false;
     cpu.NMI_pending = false;
+    bool prev_irq_in_frame = bus.regs.irq_enabled;
 
     // D??tection du flip X pour recalculer l'origine LFSR ??toiles (??5.6 MAME)
     bool prev_flip_x = bus.regs.flip_screen_x;
@@ -693,13 +694,19 @@ void GalaxianEmulator::run_frame() {
         // NMI VBLANK : le hardware Galaxian a un flip-flop "NMI ON" (0x7001).
         // Le jeu doit explicitement activer irq_enabled via ??criture sur 0x7001
         // avant que la NMI ne soit autoris??e (conform??ment MAME ??8.1).
-        if (bus.video_cnt.take_vblank_edge()) {
-            if (bus.regs.irq_enabled) {
-                cpu.INT_line = true;
-                log_irq_event("TRIGGER", cpu.total_cycles);
-            }
+        bool vblank_edge_now = bus.video_cnt.take_vblank_edge();
+
+        if (vblank_edge_now && bus.regs.irq_enabled) {
+            cpu.NMI_pending = true;
+            log_irq_event("NMI_TRIGGER", cpu.total_cycles);
+        } else if (!vblank_edge_now && !prev_irq_in_frame && bus.regs.irq_enabled
+                   && bus.video_cnt.vblank_active) {
+            // irq_enabled passed false->true during VBLANK (game disabled/re-enabled NMI mid-frame)
+            cpu.NMI_pending = true;
+            log_irq_event("NMI_TRIGGER", cpu.total_cycles);
         }
 
+        prev_irq_in_frame = bus.regs.irq_enabled;
         dbg_prev_vcounter = bus.video_cnt.v_counter;
 
         // ------------------------------------------------------------------

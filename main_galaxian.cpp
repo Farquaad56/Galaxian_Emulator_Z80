@@ -14,7 +14,7 @@ static std::vector<uint32_t> rot_buf;
 
 void blit_rotated(const uint32_t* src, uint32_t* dst) {
     // src = framebuffer brut [ry * FB_W + rx * 3 + s]
-    // dst = portrait [yp * PORT_W + ry] où yp = rx*3+s (axe H → vertical)
+    // dst = portrait [yp * PORT_W + ry] où yp = rx*3+s (axe H → vertical écran)
     for (int ry = 0; ry < GalaxianEmulator::FB_H; ry++)
         for (int rx = 0; rx < 256; rx++)
             for (int s = 0; s < 3; s++) {

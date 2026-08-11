@@ -11,7 +11,12 @@ struct VideoCounter {
     int h_counter = 0;
     int v_counter = 0;
     bool vblank_active = false;
-    bool vblank_edge = false; // true au front montant VBlank (une fois par frame)
+    // vblank_edge : front montant détecté cette frame (consommé par take_vblank_edge)
+    // vblank_edge_pending : flag persistant tant que VBLANK est actif
+    //                        utilisé pour déclencher la NMI si irq_enabled passe à true
+    //                        pendant une frame déjà en cours de VBLANK
+    bool vblank_edge = false;
+    bool vblank_edge_pending = false;
 
     VideoCounter() {}
 
@@ -23,8 +28,9 @@ struct VideoCounter {
             v_counter++;
             if (v_counter >= 264) v_counter = 0;
             vblank_active = (v_counter >= 224);
-            // Déclencher le front montant une seule fois par frame
+            // Mémoriser le front montant une seule fois par frame
             if (old_v < 224 && v_counter >= 224) {
+                vblank_edge_pending = true;
                 vblank_edge = true;
             }
         }
@@ -32,6 +38,8 @@ struct VideoCounter {
 
     void step(int cycles) { tick(cycles); }
 
+    // Consomme le front de cette frame. Retourne true si un front VBLANK
+    // a été détecté au cours de cet appel (indépendamment de irq_enabled).
     bool take_vblank_edge() {
         bool edge = vblank_edge;
         vblank_edge = false;
@@ -43,6 +51,7 @@ struct VideoCounter {
         v_counter = 0;
         vblank_active = false;
         vblank_edge = false;
+        vblank_edge_pending = false;
     }
 
     bool in_irq_window() const { return (v_counter == 224 && h_counter < 10); }
@@ -258,9 +267,12 @@ public:
             break;
         case 0x7000:                                             // /LATCH 7000-77FF (§3.4 MAME)
             switch (off) {
-                case 0x01:                                         // 7001 = IRQ ON/OFF (maskable INT, pas NMI physique)
+                case 0x01:                                         // 7001 = NMI ON/OFF
                     regs.irq_enabled = b0;
-                    if (!b0 && cpu_ptr) cpu_ptr->INT_line = false;   // CLEAR_LINE — clears pending IRQ
+                    if (!b0 && cpu_ptr) {
+                        cpu_ptr->INT_line      = false;
+                        cpu_ptr->NMI_pending  = false;   // ✅ clear pending NMI when disabled
+                    }
                     break;
                 case 0x04: regs.star_enable   = b0; break;          // 7004 = STARS ON
                 case 0x06: regs.flip_screen_x = b0; break;          // 7006 = HFLIP

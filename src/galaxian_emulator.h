@@ -23,13 +23,13 @@ struct CycleTrace {
 // ============================================================================
 // NOTE: Tous les logs désactivés car le boot est stable et l'émulation fonctionne.
 //       Réactiver temporairement pour debug en changeant 0 → 1.
-#define LOG_BOOT_TRACE      1   // boot_opcode_trace.log    : 512 premiers opcodes au boot
-#define LOG_IRQ_EVENTS      1   // irq_events.log           : trigger/ack VBLANK (INT correction)
-#define LOG_HW_REG_ACCESS   1   // hw_reg_access.log        : écritures hardware 0x6000-0x7FFF
+#define LOG_BOOT_TRACE      0   // boot_opcode_trace.log    : POST stable, plus besoin
+#define LOG_IRQ_EVENTS      1   // irq_events.log           : trigger/ack VBLANK (NMI correction)
+#define LOG_HW_REG_ACCESS   0   // hw_reg_access.log        : écritures hardware stables
 #define LOG_VRAM_SNAPSHOTS  0   // vram_snapshots.log       : VRAM/CRAM toutes les 60 frames
 #define LOG_CPU_STATE       0   // cpu_state_keymoments.log : registres CPU aux moments clés
 #define LOG_SPRITES         0   // sprites_log.log          : position sprites toutes les 60 frames
-#define LOG_MEMORY_ACCESS   1   // memory_access.log        : accès mémoire Z80 (R/W)
+#define LOG_MEMORY_ACCESS   0   // memory_access.log        : trop verbeux, masque l'info utile
 #define LOG_TILEMAP_DEBUG   0   // tilemap_debug.log        : analyse tuilemap par frame
 #define LOG_BOOT_SEQUENCE   0   // boot_sequence.log        : séquence de boot détaillée
 #define LOG_RENDER_DEBUG    0   // render_debug.log         : stats rendu par frame

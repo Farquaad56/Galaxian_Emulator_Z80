@@ -358,9 +358,22 @@ int z80_step(Z80* cpu) {
 
     // ====================================================================
     // ÉTAPE 4 : HALT — CPU en pause jusqu'à INT/NMI
+    // Le Z80 se réveille SI une NMI est pending (toujours, même avec IFF1=0)
+    // ou SI une INT maskable est pending ET IFF1=true.
     // ====================================================================
     if (cpu->halted) {
         cpu->R = (cpu->R & 0x80) | ((cpu->R + 1) & 0x7F);
+        if (cpu->NMI_pending) {
+            cpu->NMI_pending = false;
+            z80_nmi(cpu);
+            return 11; // 4(halt) + 3(push) + 4(PC)
+        }
+        if (cpu->INT_line && cpu->IFF1) {
+            cpu->halted = false;
+            cpu->INT_line = false;
+            z80_interrupt(cpu, 0xFF);
+            return (cpu->IM == 2) ? 19 : 13;
+        }
         return 4;
     }
 
