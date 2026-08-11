@@ -700,13 +700,13 @@ void GalaxianEmulator::run_frame() {
         bool vblank_edge_now = bus.video_cnt.take_vblank_edge();
 
         if (vblank_edge_now && bus.regs.irq_enabled) {
-            cpu.NMI_pending = true;
-            log_irq_event("NMI_TRIGGER", cpu.total_cycles);
+            cpu.INT_line = true;
+            log_irq_event("TRIGGER", cpu.total_cycles);
         } else if (!vblank_edge_now && !prev_irq_in_frame && bus.regs.irq_enabled
                    && bus.video_cnt.vblank_active) {
-            // irq_enabled passed false->true during VBLANK (game disabled/re-enabled NMI mid-frame)
-            cpu.NMI_pending = true;
-            log_irq_event("NMI_TRIGGER", cpu.total_cycles);
+            // irq_enabled passed false->true during VBLANK (game disabled/re-enabled IRQ mid-frame)
+            cpu.INT_line = true;
+            log_irq_event("TRIGGER", cpu.total_cycles);
         }
 
         prev_irq_in_frame = bus.regs.irq_enabled;

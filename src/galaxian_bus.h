@@ -267,11 +267,10 @@ public:
             break;
         case 0x7000:                                             // /LATCH 7000-77FF (§3.4 MAME)
             switch (off) {
-                case 0x01:                                         // 7001 = NMI ON/OFF
+                case 0x01:                                         // 7001 = IRQ ON/OFF (gate AND sur /INT, pas une vraie NMI)
                     regs.irq_enabled = b0;
                     if (!b0 && cpu_ptr) {
-                        cpu_ptr->INT_line      = false;
-                        cpu_ptr->NMI_pending  = false;   // ✅ clear pending NMI when disabled
+                        cpu_ptr->INT_line = false;   // CLEAR_LINE : efface la ligne INT immédiatement
                     }
                     break;
                 case 0x04: regs.star_enable   = b0; break;          // 7004 = STARS ON
