@@ -9,17 +9,18 @@
 #include "ui/debug_ui.h"
 
 // Rotation 90° horaire (MAME ROT90) : brut(768×224) → portrait(224×768)
-// Transpose l'axe H brut en axe vertical écran, l'axe V brut en axe horizontal écran.
+// Mapping exact MAME mame0286 (emucore.h + render.cpp oriented_texcoords[5]) : dst[row = x][col = H-1-y]
+//   axe X brut (x) → vertical écran (haut→bas), axe Y brut (y) → horizontal écran (droite→gauche).
 static std::vector<uint32_t> rot_buf;
 
 void blit_rotated(const uint32_t* src, uint32_t* dst) {
     // src = framebuffer brut [ry * FB_W + rx * 3 + s]
-    // dst = portrait [yp * PORT_W + ry] où yp = rx*3+s (axe H → vertical écran)
+    // dst = portrait [xp * PORT_W + (FB_H-1-ry)] où xp = rx*3+s (axe X brut → vertical écran)
     for (int ry = 0; ry < GalaxianEmulator::FB_H; ry++)
         for (int rx = 0; rx < 256; rx++)
             for (int s = 0; s < 3; s++) {
-                int yp = rx * 3 + s;                      // axe H brut → vertical écran
-                dst[yp * GalaxianEmulator::PORT_W + ry] = src[ry * GalaxianEmulator::FB_W + rx * 3 + s];
+                int xp = rx * 3 + s;                      // position sur l'axe X brut (0..767)
+                dst[xp * GalaxianEmulator::PORT_W + (GalaxianEmulator::FB_H - 1 - ry)] = src[ry * GalaxianEmulator::FB_W + rx * 3 + s];
             }
 }
 
@@ -69,11 +70,11 @@ int main() {
         return 1;
     }
 
-    emu.reset();
+    emu.reset(true);  // power-on reset: clear RAM/VRAM/SPRAM (S14 pt B)
 
     // ========================================================================
-    // Texture Raylib pour l'écran émulé — portrait 256×768 (après rotation ROT90)
-    // Le framebuffer interne est 768×256 ; on le pivot à l'affichage.
+    // Texture Raylib pour l'écran émulé — portrait 224×768 (après rotation ROT90 horaire MAME)
+    // Le framebuffer interne est 768×224 ; on le pivote à l'affichage.
     // ========================================================================
     rot_buf.resize(PORT_W * PORT_H);   // portrait 224 × 768
 
@@ -105,15 +106,9 @@ int main() {
         inp.start2  = IsKeyPressed(KEY_TWO);
         inp.coin1   = IsKeyPressed(KEY_FIVE);
 
-        inp.left2   = IsKeyDown(KEY_N);
-        inp.right2  = IsKeyDown(KEY_M);
-        inp.fire2   = IsKeyDown(KEY_COMMA);
-        inp.coin2   = IsKeyPressed(KEY_SIX);
-
-        if (IsKeyPressed(KEY_F1)) {
-            inp.test_switch = !inp.test_switch;
-        }
-        inp.service = IsKeyDown(KEY_F2);
+        // TEST et SERVICE = interrupteurs basculables (toggle) → registres hardware
+        if (IsKeyPressed(KEY_F1)) emu.bus.regs.test_switch = !emu.bus.regs.test_switch;
+        if (IsKeyPressed(KEY_F2)) emu.bus.regs.service_switch = !emu.bus.regs.service_switch;
 
         if (IsKeyPressed(KEY_P)) {
             paused = !paused;
@@ -137,7 +132,7 @@ int main() {
             }
         }
 
-        // Rotation ROT90 : brut(768×224) → portrait(224×768)
+        // Rotation ROT90 (horaire, conforme MAME) : brut(768×224) → portrait(224×768)
         blit_rotated(emu.get_framebuffer(), rot_buf.data());
         UpdateTexture(screen_tex, rot_buf.data());
 

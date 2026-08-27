@@ -42,7 +42,7 @@ struct BootChecker {
 
     void tick_frame() {
         if (verdict) return;
-        if (++frame > TIMEOUT_FRAMES) fail("timeout 30 frames");
+        if (++frame > TIMEOUT_FRAMES) fail("timeout 300 frames");
     }
 
     void note_watchdog_reset() {
@@ -57,6 +57,6 @@ struct BootChecker {
     void fail(const char* reason) {
         verdict = true;
         // échec boot — silencieux (debug via logs fichiers si besoin)
-        (void)reason;
+        printf("[BOOT] FAIL: %s\n", reason);
     }
 };

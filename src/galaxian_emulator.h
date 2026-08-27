@@ -49,8 +49,8 @@ public:
     uint32_t palette[32]          = {};   // Palette précalculée ARGB (sprites/tuiles)
     uint32_t star_color[64]       = {};   // 64 couleurs étoiles dédiées (§5.4/§5.5)
     // Framebuffer brut MAME : 768 large (×3 horizontal) × 224 haut (zone visible uniquement)
-    // Axe X brut (0..767, ×3) → vertical à l'écran après ROT90
-    // Axe Y brut (0..223)     → horizontal à l'écran après ROT90
+    // Axe X brut (0..767, ×3) → vertical à l'écran après ROT90 horaire MAME (haut→bas)
+    // Axe Y brut (0..223)     → horizontal à l'écran après ROT90 horaire MAME (droite→gauche)
     static constexpr int FB_W = 256 * 3;    // 768 (sous-pixels horizontaux, axe H brut)
     static constexpr int FB_H = 224;        // 224 lignes visibles (axe V brut)
     static constexpr int PORT_W = 224;      // largeur écran portrait après ROT90 (= axe V brut)
@@ -80,12 +80,13 @@ public:
     uint8_t  ring_op[64]     = {};   // opcode correspondant
     int      ring_idx        = 0;
     bool     seen_main       = false; // true si CPU a atteint la zone principale (0x2000+)
+    uint16_t dbg_prev_pc     = 0xFFFF; // prev PC for step-6 handler detection (S14 pt A)
 
     GalaxianEmulator();
     ~GalaxianEmulator();
 
     bool load_roms(const char* rom_dir);
-    void reset();
+    void reset(bool power_on = false);
     void run_frame();
 
     // Debug helpers

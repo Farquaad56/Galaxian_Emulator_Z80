@@ -62,16 +62,25 @@ struct VideoCounter {
 // ============================================================================
 struct HardwareRegs {
     bool irq_enabled       = false; // bit 0 de 0x7001 — enable IRQ VBLANK maskable
-    bool first_irq_triggered = false; // true après la première IRQ (boot terminé)
-    bool coin_lock         = false; // 0x6002 bit0
     bool flip_screen_x     = false; // 0x7006 — Flip screen X (mirror 0x07f8)
     bool flip_screen_y     = false; // 0x7007 — Flip screen Y (mirror 0x07f8)
     bool star_enable       = false; // 0x7004 bit0
-    uint8_t sound_ctrl     = 0;     // 0x6004/0x6005 (ports son)
+    bool lamp_1p           = false; // 0x6000 bit0 — 1P START LAMP (§3.6 start_lamp_w offset 0)
+    bool lamp_2p           = false; // 0x6001 bit0 — 2P START LAMP (§3.6 start_lamp_w offset 1)
+    bool coin_lockout      = true;  // 0x6002 ~data&1 — lockout actif quand 0 (polarité inversée §3.6)
+    int  coin_counter      = 0;     // 0x6003 front montant (§3.6 coin_count_0_w)
+    bool coin_ctr_prev     = false; // mémorisation niveau pour détection front montant
+
+    // Flip-screen dirty flag — MAME §5.6 : recalcul origin LFSR à chaque changement d'écriture
+    bool flip_x_dirty      = false;
 
     // Watchdog — MAME : set_vblank_count("screen", 8) → reset si pas de lecture 0x7800 pendant 8 VBLANK (~132ms)
     int     watchdog_vblanks   = 0; // compteur de VBLANK depuis dernier réarmement
     static constexpr int WATCHDOG_MAX_VBLANKS = 8;
+
+    // Interrupteurs TEST et SERVICE — bits 6/7 de IN0 (IP_ACTIVE_LOW)
+    bool test_switch     = false; // bit 6 : TEST actif quand true (ligne tirée à 0)
+    bool service_switch  = true;  // bit 7 : SERVICE actif quand true (ligne tirée à 0) — actif par défaut
 };
 
 // ============================================================================
@@ -80,13 +89,11 @@ struct HardwareRegs {
 struct InputState {
     bool left    = false, right  = false, fire   = false;
     bool start1  = false, start2 = false;
-    bool coin1   = false, service= false;
-    bool left2   = false, right2 = false, fire2  = false, coin2 = false;
+    bool coin1   = false, coin2  = false;
     uint8_t dipsw_coinage  = 0x00;
     uint8_t dipsw_bonus    = 0x01;
-    uint8_t dipsw_lives    = 0x01;   // ✅ 3 vies par défaut (bit 2=1)
-    uint8_t dipsw_cabinet  = 0x00;   // ✅ Upright par défaut (bit 5=0 → IN0 bit5=0)
-    bool test_switch = false;
+    uint8_t dipsw_lives    = 0x01;   // 3 vies par défaut (bit 2=1)
+    uint8_t dipsw_cabinet  = 0x00;   // Upright par défaut (bit 5=0 → IN0 bit5=0)
 };
 
 // Forward declaration
@@ -192,9 +199,9 @@ public:
         // Bit 5 = DIP Cabinet (0=Upright, 1=Cocktail) — valeur brute du switch
         if (input.dipsw_cabinet) v |= (1 << 5);
         // Bit 6 = TEST (IP_ACTIVE_LOW : 1 au repos, 0 si enfoncé)
-        if (!input.test_switch) v |= (1 << 6);
+        if (!regs.test_switch) v |= (1 << 6);
         // Bit 7 = SERVICE (IP_ACTIVE_LOW : 1 au repos, 0 si enfoncé)
-        if (!input.service)     v |= (1 << 7);
+        if (!regs.service_switch)     v |= (1 << 7);
         return v;                                // IN0 idle = 0xC0
     }
 
@@ -250,9 +257,12 @@ public:
         switch (addr & 0x7800) {                                  // 4 régions hardware
         case 0x6000:                                             // /DRIVER 6000-67FF (§3.2 MAME)
             switch (off) {
-                case 0x01: break;                                 // 6001 = 2P START LAMP (ignoré)
-                case 0x02: regs.coin_lock = b0; break;            // 6002 = Coin lockout
-                case 0x03: break;                                 // 6003 = Coin counter (ignoré)
+                case 0x00: regs.lamp_1p = b0; break;             // 6000 = 1P START LAMP (§3.6 start_lamp_w offset 0)
+                case 0x01: regs.lamp_2p = b0; break;             // 6001 = 2P START LAMP (offset 1)
+                case 0x02: regs.coin_lockout = !b0; break;       // 6002 = Coin lockout — inversion ~data&1 (§3.6 coin_lock_w)
+                case 0x03:                                           // 6003 = Coin counter — front montant (§3.6 coin_count_0_w)
+                    if (b0 && !regs.coin_ctr_prev) regs.coin_counter++;
+                    regs.coin_ctr_prev = b0; break;
                 case 0x04: audio_synth.write_dac(0, b0); break;   // 6004 = DAC bit 0 (1MΩ)
                 case 0x05: audio_synth.write_dac(1, b0); break;   // 6005 = DAC bit 1 (470kΩ)
                 case 0x06: audio_synth.write_dac(2, b0); break;   // 6006 = DAC bit 2 (220kΩ)
@@ -267,14 +277,14 @@ public:
             break;
         case 0x7000:                                             // /LATCH 7000-77FF (§3.4 MAME)
             switch (off) {
-                case 0x01:                                         // 7001 = IRQ ON/OFF (gate AND sur /INT, pas une vraie NMI)
+                case 0x01:                                         // 7001 = IRQ ON/OFF (gate AND sur NMI)
                     regs.irq_enabled = b0;
-                    if (!b0 && cpu_ptr) {
-                        cpu_ptr->INT_line = false;   // CLEAR_LINE : efface la ligne INT immédiatement
-                    }
+                    // S4-B : CLEAR_LINE sur une ligne NMI n'annule pas un pending déjà latched (§4 MAME).
                     break;
                 case 0x04: regs.star_enable   = b0; break;          // 7004 = STARS ON
-                case 0x06: regs.flip_screen_x = b0; break;          // 7006 = HFLIP
+                case 0x06:                                              // 6006 = HFLIP — marquer dirty pour recalcul LFSR étoiles à la frame suivante
+                    if (regs.flip_screen_x != b0) regs.flip_x_dirty = true;
+                    regs.flip_screen_x = b0; break;          // 7006 = HFLIP
                 case 0x07: regs.flip_screen_y = b0; break;          // 7007 = VFLIP
                 default: break;
             }

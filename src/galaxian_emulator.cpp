@@ -1,4 +1,4 @@
-#include "galaxian_emulator.h"
+﻿#include "galaxian_emulator.h"
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
@@ -389,16 +389,26 @@ bool GalaxianEmulator::validate_ram() {
 // Le Z80 d??marre en IM=0, IFF1=false, I=0x00.
 // Le boot Galaxian configure lui-m??me IM2 + I pendant le POST (PC???0x1B79).
 // ============================================================================
-void GalaxianEmulator::reset() {
+void GalaxianEmulator::reset(bool power_on) {
     z80_init(&cpu);
     connect_callbacks(); // ??? INDISPENSABLE apr??s z80_init
-    memset(bus.ram,   0, sizeof(bus.ram));
+    if (power_on) {
     memset(bus.vram,  0, sizeof(bus.vram));
     memset(bus.spram, 0, sizeof(bus.spram));
+    }
 
     // NE PAS toucher ?? bus.rom ici ??? la ROM reste intacte apr??s load_roms()
 
+    // Les interrupteurs TEST/SERVICE sont des toggles maintenus (vraies positions
+    // d'interrupteur physique). Un reset (R, watchdog, reboot) ne doit donc PAS
+    // les remettre ? z?ro : leur position persiste, comme un vrai switch c?bl?e.
+    // Seuls les registres hardware c?bl?s du Z80 sont remis ? z?ro.
+    bool test_pos = bus.regs.test_switch;
+    bool svc_pos  = bus.regs.service_switch;
+
     bus.regs = HardwareRegs{};
+    bus.regs.test_switch    = test_pos;
+    bus.regs.service_switch = svc_pos;
 
     bus.regs.irq_enabled = false;  // NMI d??sactiv?? par d??faut (??4 MAME)
 
@@ -408,7 +418,6 @@ void GalaxianEmulator::reset() {
     cpu.I    = 0x00;
     cpu.IFF1 = false;
     cpu.IFF2 = false;
-    bus.regs.first_irq_triggered = false;
 
     star_lfsr = 0;   // Le feedback invers?? (bit12 XOR NOT bit0) ne se bloque pas ?? 0 (??6.3 MAME)
     trace_log.clear();
@@ -533,18 +542,21 @@ void GalaxianEmulator::build_palette() {
         uint8_t r = lut3[(p >> 0) & 0x07];   // bits 2:0 ??? Rouge
         uint8_t g = lut3[(p >> 3) & 0x07];   // bits 5:3 ??? Vert
         uint8_t b = lut2[(p >> 6) & 0x03];   // bits 7:6 ??? Bleu
-        // RGB_MAXIMUM = 224 (MAME ??5.4) ??? le plafond est dans l'alpha, pas dans les canaux
-        palette[i] = (static_cast<uint32_t>(224u) << 24) | (static_cast<uint32_t>(r) << 16) | (static_cast<uint32_t>(g) << 8) | static_cast<uint32_t>(b);
+        // S17: pack as RGBA (memory order [R][G][B][A]) for raylib R8G8B8A8
+        const uint8_t a = 224;
+        palette[i] = (static_cast<uint32_t>(a) << 24) | (static_cast<uint32_t>(b) << 16) | (static_cast<uint32_t>(g) << 8) | static_cast<uint32_t>(r);
     }
 
-    // Palette ??toiles d??di??e 64 couleurs (??5.4/??5.5) ??? r??seau 150??/100??
     // Chaque entr??e utilise 2 octets de color_prom (paires successives)
+    // S13: palette etoiles dediee - reseau resistif distinct 150k/100k (S5.4)
+    static const uint8_t star_lut[4] = { 0x00, 0x5D, 0xB8, 0xE0 };
     for (int i = 0; i < 64; i++) {
-        uint8_t p = color_prom[i & 31];  // recycle les 32 octets PROM
-        uint8_t r = lut3[(p >> 0) & 0x07];
-        uint8_t g = lut3[(p >> 3) & 0x07];
-        uint8_t b = lut2[(p >> 6) & 0x03];
-        star_color[i] = (static_cast<uint32_t>(224u) << 24) | (static_cast<uint32_t>(r) << 16) | (static_cast<uint32_t>(g) << 8) | static_cast<uint32_t>(b);
+        uint8_t r = star_lut[(i >> 0) & 0x03];
+        uint8_t g = star_lut[(i >> 2) & 0x03];
+        uint8_t b = star_lut[(i >> 4) & 0x03];
+        // S17: RGBA packing for raylib R8G8B8A8; alpha=255 (S13 pt 7)
+        const uint8_t a = 255;
+        star_color[i] = (static_cast<uint32_t>(a) << 24) | (static_cast<uint32_t>(b) << 16) | (static_cast<uint32_t>(g) << 8) | static_cast<uint32_t>(r);
     }
 
     LOG_INFO("[PALETTE] MAME conforme ??? RGB 3-3-2 bits, RGB_MAXIMUM=224, star_color[64] construit\n");
@@ -628,13 +640,16 @@ void GalaxianEmulator::run_frame() {
     bus.video_cnt.reset_frame();
 
     // Les lignes d'interruption doivent ??tre basses en d??but de frame
-    cpu.INT_line = false;
     cpu.NMI_pending = false;
     bool prev_irq_in_frame = bus.regs.irq_enabled;
 
-    // D??tection du flip X pour recalculer l'origine LFSR ??toiles (??5.6 MAME)
-    bool prev_flip_x = bus.regs.flip_screen_x;
-
+    // S14-A: initialiser dbg_prev_pc pour detection entree handler NMI 0x0066
+    dbg_prev_pc = cpu.PC;
+    // S11/S9: recalculer origine LFSR etoiles si flip_x a change (\xc2\xa55.6 MAME)
+    if (bus.regs.flip_x_dirty) {
+        bus.stars_update_origin(star_lfsr, bus.regs.flip_screen_x);
+        bus.regs.flip_x_dirty = false;
+    }
     int cycles_done = 0;
 
     // Le jeu Galaxian configure lui-m??me I + IM2 + EI au boot (PC???0x1B79).
@@ -700,12 +715,8 @@ void GalaxianEmulator::run_frame() {
         bool vblank_edge_now = bus.video_cnt.take_vblank_edge();
 
         if (vblank_edge_now && bus.regs.irq_enabled) {
-            cpu.INT_line = true;
-            log_irq_event("TRIGGER", cpu.total_cycles);
-        } else if (!vblank_edge_now && !prev_irq_in_frame && bus.regs.irq_enabled
-                   && bus.video_cnt.vblank_active) {
-            // irq_enabled passed false->true during VBLANK (game disabled/re-enabled IRQ mid-frame)
-            cpu.INT_line = true;
+            // S4: NMI non-masquable - latche jusqu acceptation par z80_step() (S4 MAME)
+            cpu.NMI_pending = true;
             log_irq_event("TRIGGER", cpu.total_cycles);
         }
 
@@ -717,7 +728,12 @@ void GalaxianEmulator::run_frame() {
         //          La NMI est g??r??e en premier dans z80_step() (prioritaire, ignore IFF1).
         //          Le handler NMI Galaxian est ?? l'adresse 0x0066.
         // ------------------------------------------------------------------
+        uint16_t pc_before = cpu.PC;
         uint32_t t = z80_step(&cpu);
+
+                // S14-A: marquer etape 6 du BootChecker quand le CPU execute depuis 0x0066
+        if (pc_before == 0x0066) boot_chk.mark(6);
+        dbg_prev_pc = pc_before;
 
         // --- BootChecker : IRQ VBLANK acceptée par le Z80 ---
 
@@ -802,10 +818,7 @@ void GalaxianEmulator::run_frame() {
     // ------------------------------------------------------------------
     // D??tection flip X ??? recalculer l'origine LFSR ??toiles (??5.6 MAME)
     // Le nombre de clocks compt??s par frame diff??re selon le sens de balayage.
-    // ------------------------------------------------------------------
-    if (bus.regs.flip_screen_x != prev_flip_x) {
-        bus.stars_update_origin(star_lfsr, bus.regs.flip_screen_x);
-    }
+    
 
     // ------------------------------------------------------------------
     // ??tape 7 : Rendu de la frame
@@ -852,9 +865,12 @@ void GalaxianEmulator::render_stars() {
             shiftreg = (shiftreg >> 1) | (feedback << 16);
 
             // Zone visible : H8=0 pour clock < 256, damier sur (V1 XOR H8)==1
-            if (clock < 256 && v1 == 1) {
-                int hlog = p / 3;    // position verticale en pixels ?cran
-                if (((v1 ^ ((hlog >> 8) & 1)) == 1) && ((shiftreg & 0x1FE01) == 0x1FE00)) {
+            // S9: avancer LFSR pour TOUT x (768 colonnes). Condition damier au rendu.
+            if (clock < 256) {
+                int hlog = p / 3;    // position verticale en pixels ecran, H8=(hlog>>8)&1
+                bool star_hit = ((v1 ^ ((hlog >> 8) & 1)) == 1)
+                              && ((shiftreg & 0x1FE01) == 0x1FE00);
+                if (star_hit) {
                     int color = (~shiftreg & 0x1F8) >> 3;
                     if (color < 64 && p + (two ? 2 : 1) <= FB_H) {
                         uint32_t c = star_color[color];
@@ -872,10 +888,11 @@ void GalaxianEmulator::render_stars() {
 }
 
 // ============================================================================
-// render_tilemap — VRAM organis??e en COLONNES d'abord : addr = col*32+row
-// Framebuffer paysage : FB_W=768 (×3 horizontal), FB_H=256.
-// Alignement sprites : sx = row*8+px (horizontal), sy = col*8+py-scroll_y (vertical).
-// ×3 sur l'axe HORIZONTAL (pas vertical) pour les sous-pixels de tuile.
+// render_tilemap — VRAM row-major, conforme MAME bg_get_tile_info (mame0286) :
+//   x = addr & 0x1f (axe X brut), y = addr >> 5 (axe Y brut)  =>  addr = row*32+col
+// Framebuffer paysage : FB_W=768 (×3 horizontal), FB_H=224.
+// Strip "col" le long de l'axe H brut ; scroll/couleur par strip : spram[col*2], spram[col*2+1]
+// (MAME set_scroll_cols(32) + attrib = m_spriteram[x*2+1]).
 // ============================================================================
 void GalaxianEmulator::render_tilemap() {
     bool fH = bus.regs.flip_screen_x;   // HFLIP → miroir axe brut X (rx)
@@ -886,7 +903,7 @@ void GalaxianEmulator::render_tilemap() {
         uint8_t color = bus.spram[col * 2 + 1] & 0x07;
 
         for (int row = 0; row < 32; row++) {
-            int vaddr = (col * 32 + row) & 0x03FF;
+            int vaddr = (row * 32 + col) & 0x03FF;   // MAME : addr = row*32+col (x=addr&0x1f, y=addr>>5)
             uint8_t tile_num = bus.vram[vaddr];
 
             for (int py = 0; py < 8; py++) {
@@ -894,9 +911,10 @@ void GalaxianEmulator::render_tilemap() {
                     uint8_t pix = decode_pixel(tile_num, px, py);
                     if (pix == 0) continue;
 
-                    // Transposition MAME : colonnes VRAM → axe V brut (ry), lignes+scroll → axe H brut (rx)
-                    int rx = (row * 8 + py - scroll_y + 256) & 0xFF;  // axe H brut (scroll ici)
-                    int ry = col * 8 + px;                           // axe V brut
+                    // S10: byte 0(spram[col*2])=vpos->axe V(ry), byte 3=couleur
+                    // Colonne VRAM longent l axe H brut (vertical physique apres ROT90).
+                    int ry = (row * 8 + py - scroll_y + 256) & 0xFF;  // axe V brut (scroll sur V)
+                    int rx = col * 8 + px;                            // axe H brut
 
                     if (fH) rx = 255 - rx;
                     if (fV) ry = FB_H - 1 - ry;
@@ -927,21 +945,20 @@ void GalaxianEmulator::render_sprites() {
     for (int i = 7; i >= 0; i--) {
         const uint8_t* s = &bus.spram[0x40 + i * 4];
 
-        int sy_raw = static_cast<int>(s[0]);   // raw Y → axe H brut (vertical physique)
-        int sx     = static_cast<int>(s[3]) + 1; // raw X → axe V brut (horizontal physique)
+        // S11: byte 0=vpos->axe V(ry), byte 3=xpos->axe H(rx). MAME §5.2.
+        int sy_raw = static_cast<int>(s[0]);   // vpos → axe V brut (ry)
+        int sx     = static_cast<int>(s[3]) + 1; // xpos → axe H brut (rx)
 
         // Correction MAME : les 3 premiers sprites (0-2) ont un décalage ±1
         // sy = 240 - (base0 - correction), correction=1 pour sprites 0,1,2
         int sy_correction = (i < 3) ? 1 : 0;
 
-        // Tile index (6 bits, bits 5:0 du byte 1)
-        uint8_t tile_idx = s[1] & 0x3F;
-
-        // Attributs (byte 2) : couleur + flip flags individuels du sprite
-        uint8_t attr     = s[2];
-        int color        = attr & 0x07;          // bits 2:0
-        bool sflipX      = (attr & 0x01) != 0;   // bit 0 → flip axe H brut (draw_py) en portrait
-        bool sflipY      = (attr & 0x02) != 0;   // bit 1 → flip axe V brut (draw_px) en portrait
+        // S11: byte 1 = tile index (bits 5:0) + flip H/V (bits 7/6) — MAME §5.2
+        uint8_t attr     = s[1];                  // attribut complet
+        uint8_t tile_idx = attr & 0x3F;           // bits 5:0 : index tuile
+        bool sflipX      = (attr & 0x80) != 0;    // bit 7 → flip axe H brut (draw_py)
+        bool sflipY      = (attr & 0x40) != 0;    // bit 6 → flip axe V brut (draw_px)
+        int color        = s[2] & 0x07;           // byte 2 : couleur bits 2:0
 
         // Sprite 16??16 = 4 tuiles de 8??8 arrang??es en 2??2
         // En portrait : axe H brut (rx, vertical physique) porte py/oy,
@@ -965,10 +982,16 @@ void GalaxianEmulator::render_sprites() {
                     int draw_py = sflipX ? (7 - py) : py;   // flip sur axe H brut
                     int draw_px = sflipY ? (7 - px) : px;   // flip sur axe V brut
 
-                    // Position brute : axe H brut (rx, ×3), axe V brut (ry)
-                    // Formule MAME : sy = 240 - (base0 - correction), correction=1 pour sprites 0-2
-                    int rx = sy_raw - sy_correction + oy + draw_py;  // axe H brut (vertical physique) avec correction
-                    int ry = sx + ox + draw_px;             // axe V brut (horizontal physique)
+                    // S11: inversion 240-vpos (§5.2 MAME) + permutation quadrants sous flip
+                    // ry sur axe V brut, rx sur axe H brut (transposé par ROT90)
+                    int qox = QOX[q];   // offset quadrant sur axe V brut (ry)
+                    int qoy = QOY[q];   // offset quadrant sur axe H brut (rx)
+                    if (sflipX) qox = 8 - qox;  // permuter quadrants gauche/droite
+                    if (sflipY) qoy = 8 - qoy;  // permuter quadrants haut/bas
+                    int ry_calc = 240 - sy_raw + sy_correction + qoy + draw_py;   // axe V brut
+                    if (ry_calc < 0 || ry_calc >= 256) continue;  // MAME: clip hors-bord, pas de wrap-around modulo 256
+                    int ry = ry_calc;
+                    int rx = sx + qox + draw_px;             // axe H brut
 
                     if (gflip_x) rx = 255 - rx;            // HFLIP → miroir axe H brut
                     if (gflip_y) ry = FB_H - 1 - ry;       // VFLIP → miroir axe V brut
@@ -976,7 +999,7 @@ void GalaxianEmulator::render_sprites() {
                     int fx = rx * 3;                        // axe H brut en sous-pixels
                     int fy = ry;                            // axe V brut
 
-                    if (fx < 0 || fx >= 224 * 3) continue;  // visible H = 672
+                    if (fx < 0 || fx >= FB_W) continue;  // S11: visible H = 768 (axe H brut)
                     if (fy < 0 || fy >= 224) continue;      // visible V = 224
 
                     // Clipping hardware 17px sur l'axe H brut (§5.2 MAME)
@@ -1008,7 +1031,7 @@ void GalaxianEmulator::render_bullets() {
     // Shells — OBJRAM base 0x60, entr??es 0 ?? 6
     for (int i = 0; i < 7; i++) {
         int base = 0x60 + i * 4;
-        uint8_t sy_raw = bus.spram[base + 0];
+        uint8_t sy_raw = bus.spram[base + 1];
         int fy = 255 - static_cast<int>(sy_raw);   // axe V brut (raw_y invers?? CRT)
 
         if (fy < 0 || fy >= 224) continue;      // visible V = 224
@@ -1019,10 +1042,10 @@ void GalaxianEmulator::render_bullets() {
 
         // Shell = ligne horizontale blanche pure (§5.4) — ×3 sur axe H brut
         uint32_t white = 0xFFFFFFFF;
-        for (int dx = 0; dx < 12; dx++) {
+        for (int dx = 0; dx < 4; dx++) { // S12: longueur 4 px bruts (§5.3 MAME)
             int fx = fx_base + dx * 3;
             if (fx < xmin_b || fx > xmax_b) continue;
-            if (fx < 0 || fx >= 224 * 3) continue;  // visible H = 672
+            if (fx < 0 || fx >= FB_W) continue;    // visible H = 768 (axe H brut, S12)
             framebuffer[fy * FB_W + fx] =
             framebuffer[fy * FB_W + fx + 1] =
             framebuffer[fy * FB_W + fx + 2] = white;
@@ -1031,8 +1054,8 @@ void GalaxianEmulator::render_bullets() {
 
     // Missile — OBJRAM base 0x60, entr??e 7 (spram[0x80])
     {
-        int base = 0x60 + 0x20;
-        uint8_t sy_raw = bus.spram[base + 0];
+        int base = 0x60 + 0x1C;                            // S12: entry 7 = 0x60+7*4 = 0x7C (S7)
+        uint8_t sy_raw = bus.spram[base + 1];
         int fy = 255 - static_cast<int>(sy_raw);
 
         if (fy < 0 || fy >= 224) return;       // visible V = 224
@@ -1042,10 +1065,10 @@ void GalaxianEmulator::render_bullets() {
 
         // Missile = jaune pur (§5.4 MAME) — ×3 sur axe H brut
         uint32_t yellow = (0xFFu << 24) | (0xFFu << 16) | (0xFFu << 8) | 0x00u;
-        for (int dx = 0; dx < 12; dx++) {
+        for (int dx = 0; dx < 4; dx++) { // S12: longueur 4 px bruts (§5.3 MAME)
             int fx = fx_base + dx * 3;
             if (fx < xmin_b || fx > xmax_b) continue;
-            if (fx < 0 || fx >= 224 * 3) continue;  // visible H = 672
+            if (fx < 0 || fx >= FB_W) continue;    // visible H = 768 (axe H brut, S12)
             framebuffer[fy * FB_W + fx] =
             framebuffer[fy * FB_W + fx + 1] =
             framebuffer[fy * FB_W + fx + 2] = yellow;

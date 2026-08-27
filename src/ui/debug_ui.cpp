@@ -90,7 +90,6 @@ void DebugUI::draw_cpu_panel(const Z80& cpu, const GalaxianBus& bus) {
         bus.regs.flip_screen_x ? "ON" : "off",
         bus.regs.flip_screen_y ? "ON" : "off");
     ImGui::Text("Star : %s", bus.regs.star_enable ? "ON" : "off");
-    ImGui::Text("Sound: 0x%02X", bus.regs.sound_ctrl);
 
     if (!bus.regs.irq_enabled && cpu.total_cycles > 10000) {
         ImGui::PushStyleColor(ImGuiCol_Text, off_col);
@@ -180,9 +179,9 @@ void DebugUI::draw_debug_panel(GalaxianEmulator& emu) {
 // Panel DIP Switches — configuration complète
 // ============================================================================
 void DebugUI::draw_dipsw_panel(GalaxianBus& bus) {
-    // DIP panel : sous CPU, bord droit (x=780)
+    // DIP panel : sous CPU, bord droit (x=780) — taille augmentée pour contenir tous les contrôles
     ImGui::SetNextWindowPos({780, 380}, ImGuiCond_Once);
-    ImGui::SetNextWindowSize({244, 260}, ImGuiCond_Once);
+    ImGui::SetNextWindowSize({260, 480}, ImGuiCond_Once);
     ImGui::Begin("DIP Switches");
 
     // ─── Coinage (IN1 bits 6-7) ──────────────────────────────────────────────
@@ -209,26 +208,41 @@ void DebugUI::draw_dipsw_panel(GalaxianBus& bus) {
     if (ImGui::Combo("Cabinet", &cab_sel, cab_str, 2))
         bus.input.dipsw_cabinet = cab_sel ? 1 : 0;
 
-    // ─── TEST Switch (IN0 bit 6) — actif HIGH ──────────────────────────────
-    ImGui::SeparatorText("TEST / SERVICE");
-    ImGui::Checkbox("TEST", &bus.input.test_switch);
-    const char* test_label = bus.input.test_switch ? "TEST ACTIVÉ" : "NORMAL";
-    ImVec4 test_col = bus.input.test_switch
-        ? ImVec4(1.0f, 0.2f, 0.2f, 1.0f)
-        : ImVec4(0.2f, 0.9f, 0.25f, 1.0f);
-    ImGui::PushStyleColor(ImGuiCol_Text, test_col);
-    ImGui::Text("%s", test_label);
-    ImGui::PopStyleColor();
+    // ─── Interrupteurs TEST et SERVICE (toggle ON/OFF) ──────────────────────
+    ImGui::SeparatorText("Interrupteurs");
 
-    // ─── SERVICE (IN0 bit 7) — actif HIGH ────────────────────────────────
-    ImGui::Checkbox("SERVICE", &bus.input.service);
-    const char* svc_label = bus.input.service ? "SERVICE ON" : "SERVICE OFF";
-    ImVec4 svc_col = bus.input.service
-        ? ImVec4(1.0f, 0.7f, 0.0f, 1.0f)
+    // Groupe radio ON/OFF : PushID unique par interrupteur évite le conflit d'ID
+    // ImGui (les libellés "ON"/"OFF" seraient sinon identiques entre TEST et SERVICE),
+    // et un état int unique garantit qu'un seul bouton est coché à la fois.
+    auto radio_pair = [](const char* id, bool& value) {
+        ImGui::PushID(id);
+        int sel = value ? 1 : 0;
+        ImGui::RadioButton("ON",  &sel, 1);
+        ImGui::SameLine();
+        ImGui::RadioButton("OFF", &sel, 0);
+        value = (sel == 1);
+        ImGui::PopID();
+    };
+
+    // TEST — IN0 bit 6 (actif HIGH interne)
+    ImGui::Text("TEST");
+    ImGui::SameLine(60);
+    radio_pair("TST", bus.regs.test_switch);
+    ImGui::SameLine(0, 12);
+    ImVec4 test_col = bus.regs.test_switch
+        ? ImVec4(0.9f, 0.3f, 0.3f, 1.0f)
+        : ImVec4(0.3f, 0.8f, 0.3f, 1.0f);
+    ImGui::TextColored(test_col, bus.regs.test_switch ? "ACTIF" : "INACTIF");
+
+    // SERVICE — IN0 bit 7 (actif HIGH interne)
+    ImGui::Text("SERVICE");
+    ImGui::SameLine(60);
+    radio_pair("SVC", bus.regs.service_switch);
+    ImGui::SameLine(0, 12);
+    ImVec4 svc_col = bus.regs.service_switch
+        ? ImVec4(0.9f, 0.7f, 0.2f, 1.0f)
         : ImVec4(0.3f, 0.3f, 0.3f, 1.0f);
-    ImGui::PushStyleColor(ImGuiCol_Text, svc_col);
-    ImGui::Text("%s", svc_label);
-    ImGui::PopStyleColor();
+    ImGui::TextColored(svc_col, bus.regs.service_switch ? "ACTIF" : "INACTIF");
 
     // ─── Configuration résumé ---
     ImGui::SeparatorText("Configuration");
@@ -284,13 +298,6 @@ void DebugUI::draw_inputs_panel(GalaxianBus& bus) {
     led("FIRE",   inp.fire);
     ImGui::SameLine();
     led("START",  inp.start1);
-
-    ImGui::SeparatorText("Joueur 2");
-    led("LEFT2",  inp.left2);  ImGui::SameLine();
-    led("RIGHT2", inp.right2); ImGui::SameLine();
-    led("FIRE2",  inp.fire2);
-    ImGui::SameLine();
-    led("START2", inp.start2);
 
     ImGui::SeparatorText("Monnayeur");
     led("COIN1",  inp.coin1);  ImGui::SameLine();
