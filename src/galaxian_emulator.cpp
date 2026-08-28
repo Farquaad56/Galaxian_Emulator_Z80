@@ -420,6 +420,7 @@ void GalaxianEmulator::reset(bool power_on) {
     cpu.IFF2 = false;
 
     star_lfsr = 0;   // Le feedback invers?? (bit12 XOR NOT bit0) ne se bloque pas ?? 0 (??6.3 MAME)
+    star_origin = 0;  // reset origine LFSR etoiles (MAME m_star_rng_origin)
     trace_log.clear();
     boot_trace_done = false;
     boot_finished = false;
@@ -648,6 +649,9 @@ void GalaxianEmulator::run_frame() {
     // S11/S9: recalculer origine LFSR etoiles si flip_x a change (\xc2\xa55.6 MAME)
     if (bus.regs.flip_x_dirty) {
         bus.stars_update_origin(star_lfsr, bus.regs.flip_screen_x);
+        // MAME §5.6 : changement de flip => recalculer l'origine pour la frame courante (off-by-one ±1 clock)
+        constexpr uint32_t STAR_PERIOD = ((1u << 17) - 1);
+        star_origin = (star_origin + (bus.regs.flip_screen_x ? 1 : STAR_PERIOD - 1)) % STAR_PERIOD;
         bus.regs.flip_x_dirty = false;
     }
     int cycles_done = 0;
@@ -842,49 +846,59 @@ void GalaxianEmulator::render_frame() {
 }
 
 // ============================================================================
-// render_stars — LFSR 17 bits : x^17 + x^14 + 1 (code MAME galaxian_v.cpp)
-// P??riode : 2^17 - 1 = 131071 clocks par frame.
-// Framebuffer paysage : FB_W=768 (×3 horizontal), FB_H=256.
-// Le LFSR d??file le long de l'axe HORIZONTAL ; le ×3 reste horizontal.
-// Damier (§5.5 MAME) : ??toiles affich??es quand (V1 XOR H8)==1 avec V1=bit1 de x,
-//   H8=bit8 de y/3 (position verticale en pixels ?cran).
+// render_stars — modele MAME (galaxian_v.cpp mame0286) :
+// - LFSR 17 bits x^17+x^14+1, periode 2^17-1 = 131071, table precalculee une fois (m_stars).
+// - Par ligne Y brute : star_offs = origin + y*512 ; 2 clocks RNG par pixel X logique
+//   (duty cycle 2/3) => sous-pixels x*3+0 / x*3+1..2.
+// - Damier (§5.5 MAME) : etoiles affichees quand (y ^ (x>>3)) & 1 == 1.
+// - Defilement : LFSR clocke 512*256 = 2^17 fois par frame, off-by-one => origin ±1/frame
+//   (MAME stars_update_origin) => le champ d'etoiles defile le long de l'axe X brut
+//   = VERTICALEMENT a l'ecran (haut vers bas quand flip_screen_x est desactive).
 // ============================================================================
 void GalaxianEmulator::render_stars() {
     if (!bus.regs.star_enable) return;
 
-    uint32_t shiftreg = star_lfsr;
+    constexpr uint32_t STAR_PERIOD = ((1u << 17) - 1);   // 131071 (MAME §5.5)
 
-    for (int x = 0; x < FB_W; x++) {
-        int v1 = (x >> 1) & 1;   // bit1 de la coordonn??e horizontale (V1)
-        bool two = false;          // alternance : 1 sous-pixel puis 2, duty cycle 2/3
-        int p = 0;                 // position courante sur l'axe vertical
+    // MAME stars_update_origin : off-by-one ±1 clock par frame selon flip X
+    star_origin = (star_origin + (bus.regs.flip_screen_x ? 1 : STAR_PERIOD - 1)) % STAR_PERIOD;
 
-        for (int clock = 0; clock < 512; clock++) {
-            // Feedback LFSR selon MAME
-            uint32_t feedback = ((shiftreg >> 12) ^ ~shiftreg) & 1;
-            shiftreg = (shiftreg >> 1) | (feedback << 16);
-
-            // Zone visible : H8=0 pour clock < 256, damier sur (V1 XOR H8)==1
-            // S9: avancer LFSR pour TOUT x (768 colonnes). Condition damier au rendu.
-            if (clock < 256) {
-                int hlog = p / 3;    // position verticale en pixels ecran, H8=(hlog>>8)&1
-                bool star_hit = ((v1 ^ ((hlog >> 8) & 1)) == 1)
-                              && ((shiftreg & 0x1FE01) == 0x1FE00);
-                if (star_hit) {
-                    int color = (~shiftreg & 0x1F8) >> 3;
-                    if (color < 64 && p + (two ? 2 : 1) <= FB_H) {
-                        uint32_t c = star_color[color];
-                        for (int k = 0; k < (two ? 2 : 1); k++)
-                            framebuffer[p * FB_W + x] = c;   // ×1 sur Y, pas de ×3 vertical
-                    }
-                }
-            }
-
-            p += two ? 2 : 1;
-            two = !two;
+    if (star_table.empty()) {
+        star_table.resize(STAR_PERIOD);
+        uint32_t sr = 0;   // seed 0 : feedback inverse (bit12 XOR NOT bit0) ne se bloque pas (§6.3 MAME)
+        for (uint32_t i = 0; i < STAR_PERIOD; i++) {
+            uint32_t feedback = ((sr >> 12) ^ ~sr) & 1;
+            sr = (sr >> 1) | (feedback << 16);
+            star_table[i] = sr;
         }
     }
-    star_lfsr = shiftreg;
+
+    for (int y = 0; y < FB_H; y++) {                       // ligne Y brute (bande visible)
+        uint32_t star_offs = (star_origin + (uint32_t)y * 512) % STAR_PERIOD;
+        for (int x = 0; x < 256; x++) {                   // pixel X logique (×3 sous-pixels)
+            int enable_star = (y ^ (x >> 3)) & 1;         // MAME §5.5 : V1 ^ H8 == 1
+
+            // Premier clock RNG => sous-pixel x*3+0
+            uint32_t star = star_table[star_offs];
+            star_offs++; if (star_offs >= STAR_PERIOD) star_offs = 0;
+            if (enable_star && ((star & 0x1FE01) == 0x1FE00)) {
+                int color = (~star & 0x1F8) >> 3;         // index 6 bits dans star_color[64]
+                framebuffer[y * FB_W + x * 3] = star_color[color];
+            }
+
+            // Deuxieme clock RNG => sous-pixels x*3+1 et x*3+2 (duty cycle 2/3)
+            star = star_table[star_offs];
+            star_offs++; if (star_offs >= STAR_PERIOD) star_offs = 0;
+            if (enable_star && ((star & 0x1FE01) == 0x1FE00)) {
+                int color = (~star & 0x1F8) >> 3;
+                framebuffer[y * FB_W + x * 3 + 1] = star_color[color];
+                framebuffer[y * FB_W + x * 3 + 2] = star_color[color];
+            }
+        }
+    }
+
+    // Synchronise l'etat legacy (LFSR audio etape 6, UI) — equivalent MAME : table[origin]
+    star_lfsr = star_table[star_origin % STAR_PERIOD];
 }
 
 // ============================================================================

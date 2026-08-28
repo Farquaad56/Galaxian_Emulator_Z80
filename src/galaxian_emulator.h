@@ -56,8 +56,10 @@ public:
     static constexpr int PORT_W = 224;      // largeur écran portrait après ROT90 (= axe V brut)
     std::vector<uint32_t> framebuffer;     // Image finale (768x224) — heap, pas stack
 
-    // Starfield LFSR 17 bits — initialisation à 0 (0x1FFFF bloque le LFSR)
-    uint32_t star_lfsr = 0;
+    // Starfield LFSR 17 bits — modele MAME : table precalculee sur la periode + origine ±1/frame
+    uint32_t star_lfsr = 0;              // etat legacy (sync audio/UI) — re-derive de star_origin chaque frame
+    uint32_t star_origin = 0;            // MAME m_star_rng_origin : ±1 par frame => defilement axe X brut (vertical ecran)
+    std::vector<uint32_t> star_table;    // etats LFSR sur une periode (MAME m_stars, 131071 entrees)
 
     // Debug / Trace
     std::vector<CycleTrace> trace_log;       // historique des traces (max 50000)
